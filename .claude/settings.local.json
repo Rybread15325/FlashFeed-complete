@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(try { $r = Invoke-WebRequest -Uri 'http://localhost:3001/api/health' -UseBasicParsing -TimeoutSec 10; Write-Host \"HTTP $\\($r.StatusCode\\): $\\($r.Content\\)\" } catch { if \\($_.Exception.Response\\) { Write-Host \"HTTP $\\($_.Exception.Response.StatusCode.Value__\\)\" } else { Write-Host \"No response: $\\($_.Exception.Message\\)\" } })",
+      "PowerShell(try { $r = Invoke-WebRequest -Uri 'http://localhost:3001/' -UseBasicParsing -TimeoutSec 5; Write-Host \"HTTP $\\($r.StatusCode\\) - Content-Type: $\\($r.Headers['Content-Type']\\)\" } catch { Write-Host \"Error: $\\($_.Exception.Message\\)\" })",
+      "Bash(npm run *)",
+      "PowerShell(try { Invoke-WebRequest -Uri 'http://localhost:3001/api/stats?days=2' -UseBasicParsing -TimeoutSec 5 | Select-Object -ExpandProperty Content } catch { \"FAIL: $\\($_.Exception.Message\\)\" })",
+      "PowerShell(try { Invoke-WebRequest -Uri 'http://localhost:3001/api/articles?limit=5&ticker_only=1&recent_days=2' -UseBasicParsing -TimeoutSec 5 | Select-Object -ExpandProperty Content | ConvertFrom-Json | ConvertTo-Json -Depth 2 } catch { \"FAIL: $\\($_.Exception.Message\\)\" })",
+      "PowerShell(try { Invoke-WebRequest -Uri 'http://localhost:3001/api/status' -UseBasicParsing -TimeoutSec 5 | Select-Object -ExpandProperty Content } catch { \"FAIL: $\\($_.Exception.Message\\)\" })",
+      "Bash(docker exec feedflash-backend node -e ' *)",
+      "Bash(docker exec *)",
+      "PowerShell(docker exec feedflash-backend node -e \"const fs=require\\('fs'\\); const lines=fs.readFileSync\\('/app/index.js','utf8'\\).split\\('\\\\n'\\); console.log\\(lines.slice\\(145,160\\).join\\('\\\\n'\\)\\);\" 2>&1)",
+      "Bash(ls \"c:/Users/Ryan B/.claude/projects/c--Users-Ryan-B-Desktop-FlashFeed-complete/memory/\" 2>/dev/null || echo \"empty\")",
+      "Read(//c/Users/Ryan B/.claude/projects/c--Users-Ryan-B-Desktop-FlashFeed-complete/memory/**)",
+      "PowerShell(Invoke-WebRequest 'http://localhost:3001/api/disk/settings' -Method PATCH -Body '{\"ttl_days\":3}' -ContentType 'application/json' -UseBasicParsing)",
+      "Bash(find \"/c/Users/Ryan B\" -name \"Sentiment-Scout-main.zip\" 2>/dev/null | head -5)",
+      "Read(//c/Users/Ryan B/**)",
+      "Bash(npm install *)",
+      "Bash(npm list *)",
+      "Bash(node -e \"const lc = require\\('C:\\\\\\\\Users\\\\\\\\Ryan B\\\\\\\\Desktop\\\\\\\\FlashFeed-complete\\\\\\\\app\\\\\\\\node_modules\\\\\\\\lightweight-charts'\\); console.log\\(Object.keys\\(lc\\).filter\\(k => k.includes\\('Series'\\) || k === 'createChart' || k === 'CrosshairMode'\\).join\\('\\\\n'\\)\\)\")",
+      "Bash(node -e \"import\\('C:/Users/Ryan B/Desktop/FlashFeed-complete/app/node_modules/lightweight-charts/dist/lightweight-charts.standalone.development.mjs'\\).then\\(lc => { console.log\\(Object.keys\\(lc\\).filter\\(k => k.includes\\('Series'\\) || k === 'createChart' || k === 'CrosshairMode' || k === 'createSeriesMarkers'\\).join\\('\\\\n'\\)\\) }\\)\")",
+      "Bash(docker compose *)",
+      "Bash(powershell -NoProfile -Command \"Invoke-WebRequest -Uri 'http://localhost:3001/api/social/ticker/AAPL' -Method POST -UseBasicParsing -TimeoutSec 90 | Select-Object -ExpandProperty Content\")"
+    ]
+  }
+}

@@ -1,0 +1,267 @@
+"""
+Fetch real RSS articles using Ryan's existing fetch_rss.py feed list/fetch logic,
+then upsert them into MongoDB for the current Express/Mongoose backend.
+
+This avoids fake seed data and does not replace Ryan's original PostgreSQL fetcher.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+from pymongo import MongoClient
+from dotenv import load_dotenv
+
+from fetch_rss import RSS_FEEDS, _fetch_feed
+from keyword_filter import load_keywords, filter_articles
+
+load_dotenv()
+
+MONGO_URI = os.environ.get("MONGODB_URI", "mongodb://localhost:27017/feedflash")
+DB_NAME = os.environ.get("MONGO_DB", "feedflash")
+
+COMMON_COMPANY_TICKERS = {
+    "nvidia": "NVDA",
+    "apple": "AAPL",
+    "tesla": "TSLA",
+    "microsoft": "MSFT",
+    "amazon": "AMZN",
+    "meta": "META",
+    "facebook": "META",
+    "google": "GOOGL",
+    "alphabet": "GOOGL",
+    "netflix": "NFLX",
+    "amd": "AMD",
+    "advanced micro devices": "AMD",
+    "super micro": "SMCI",
+    "super micro computer": "SMCI",
+    "micron": "MU",
+    "intel": "INTC",
+    "palantir": "PLTR",
+    "casey's": "CASY",
+    "caseys": "CASY",
+    "newmont": "NEM",
+    "badger meter": "BMI",
+    "west fraser": "WFG",
+    "oracle": "ORCL",
+    "alcoa": "AA",
+    "goldman": "GS",
+    "jpmorgan": "JPM",
+    "jp morgan": "JPM",
+    "bank of america": "BAC",
+    "walmart": "WMT",
+    "costco": "COST",
+    "broadcom": "AVGO",
+    "qualcomm": "QCOM",
+    "salesforce": "CRM",
+    "adobe": "ADBE",
+    "snowflake": "SNOW",
+    "coinbase": "COIN",
+    "bitcoin": "BTC",
+    "ethereum": "ETH",
+}
+
+BULLISH_WORDS = [
+    "rise", "rises", "rose", "jump", "jumps", "surge", "surges", "gain", "gains",
+    "beat", "beats", "strong", "growth", "upgrade", "raises", "bullish",
+    "record", "profit", "approval", "partnership", "contract", "dividend"
+]
+
+BEARISH_WORDS = [
+    "fall", "falls", "fell", "drop", "drops", "slump", "slumps", "miss",
+    "misses", "weak", "downgrade", "cuts", "bearish", "lawsuit", "fraud",
+    "bankruptcy", "recall", "layoffs", "concern", "concerns", "risk-off"
+]
+
+BLOCKED_TICKERS = {
+    "AI", "IPO", "CEO", "CFO", "ETF", "SEC", "FDA", "USA", "USD", "GDP",
+    "EV", "PE", "EPS", "ROI", "API", "IT", "NEW", "FOR", "ARE", "THE",
+    "ANTHROPIC", "OPENAI", "SPACEX"
+}
+
+
+def extract_lightweight_tickers(title: str, content: str) -> str:
+    text = f"{title} {content}"
+    found = set()
+
+    # Exchange patterns like (NYSE: BMI), NASDAQ: AAPL, TSX: WFG
+    for match in re.findall(r"(?:NYSE|NASDAQ|Nasdaq|TSX|AMEX)\s*:\s*([A-Z]{1,5})", text):
+        found.add(match.upper())
+
+    # Cash-tag patterns like $NVDA
+    for match in re.findall(r"\$([A-Z]{1,5})\b", text):
+        found.add(match.upper())
+
+    # Parenthetical ticker patterns like Casey's (CASY)
+    for match in re.findall(r"\(([A-Z]{1,5})\)", text):
+        found.add(match.upper())
+
+    lower_text = text.lower()
+    for company, ticker in COMMON_COMPANY_TICKERS.items():
+        if company in lower_text:
+            found.add(ticker)
+
+    found = {ticker for ticker in found if ticker not in BLOCKED_TICKERS}
+    return ",".join(sorted(found))
+
+
+def score_lightweight_sentiment(title: str, content: str) -> tuple[str, float]:
+    text = f"{title} {content[:500]}".lower()
+
+    bullish = sum(1 for word in BULLISH_WORDS if word in text)
+    bearish = sum(1 for word in BEARISH_WORDS if word in text)
+
+    if bullish > bearish:
+        return "bullish", min(0.95, round(0.45 + 0.1 * bullish, 2))
+    if bearish > bullish:
+        return "bearish", min(0.95, round(0.45 + 0.1 * bearish, 2))
+    return "neutral", 0.0
+
+
+client = MongoClient(MONGO_URI)
+db = client[DB_NAME]
+articles_col = db["articles"]
+
+keywords = load_keywords(None)
+
+COOLDOWN_SECONDS = int(os.environ.get("RSS_COOLDOWN_SECONDS", "60"))
+STATE_FILE = Path(os.environ.get("RSS_STATE_FILE", "1_News/pipeline/.rss_fetch_state.json"))
+
+
+def load_fetch_state():
+    if STATE_FILE.exists():
+        try:
+            return json.loads(STATE_FILE.read_text())
+        except Exception:
+            return {}
+    return {}
+
+
+def save_fetch_state(state):
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    STATE_FILE.write_text(json.dumps(state, indent=2, sort_keys=True))
+
+
+fetch_state = load_fetch_state()
+
+total_new = 0
+total_updated = 0
+total_skip = 0
+cooldown_skips = []
+
+
+def process_feed(feed):
+    name, url, category = feed
+    now_ts = int(time.time())
+
+    last_fetch = int(fetch_state.get(url, 0))
+    seconds_since = now_ts - last_fetch
+    seconds_left = COOLDOWN_SECONDS - seconds_since
+
+    if seconds_left > 0:
+        return name, url, [], False, seconds_left
+
+    print(f"Fetching {name}...")
+
+    raw_articles = _fetch_feed(name, url, category)
+
+    docs = []
+
+    for article in raw_articles:
+        article["detected_at"] = now_ts
+
+        title = article.get("title", "")
+        content = article.get("content", "")
+
+        article["ticker"] = extract_lightweight_tickers(title, content)
+        sentiment, confidence = score_lightweight_sentiment(title, content)
+        article["sentiment"] = sentiment
+        article["ml_confidence"] = confidence
+        article["sentiment_at"] = now_ts if sentiment != "neutral" else None
+
+    filtered_articles = filter_articles(raw_articles, keywords, require_match=False)
+
+    for article in filtered_articles:
+        article_id = article.get("id")
+        article_url = article.get("url")
+
+        if not article_id or not article_url:
+            continue
+
+        keyword_match = article.get("keyword_match")
+        keyword_match_list = [keyword_match] if keyword_match else []
+
+        docs.append({
+            "article_id": article_id,
+            "title": article.get("title", ""),
+            "content": article.get("content", ""),
+            "url": article_url,
+            "source": article.get("source", name),
+            "category": article.get("category", category),
+            "publish_date": article.get("publish_date"),
+            "fetched_date": now_ts,
+            "detected_at": article.get("detected_at", now_ts),
+            "ticker": article.get("ticker", ""),
+            "company": article.get("company", ""),
+            "sentiment": article.get("sentiment", "neutral"),
+            "ml_confidence": article.get("ml_confidence", 0),
+            "sentiment_at": article.get("sentiment_at"),
+            "keyword_match": keyword_match_list,
+        })
+
+    return name, url, docs, True, 0
+
+
+MAX_WORKERS = int(os.environ.get("RSS_MAX_WORKERS", "8"))
+
+print(f"Starting parallel RSS import with {MAX_WORKERS} workers...")
+
+with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+    futures = [executor.submit(process_feed, feed) for feed in RSS_FEEDS]
+
+    for future in as_completed(futures):
+        name, url, docs, did_fetch, seconds_left = future.result()
+
+        if not did_fetch:
+            cooldown_skips.append(seconds_left)
+            continue
+
+        fetch_state[url] = int(time.time())
+
+        feed_new = 0
+        feed_updated = 0
+        feed_skip = 0
+
+        for mongo_doc in docs:
+            result = articles_col.update_one(
+                {"article_id": mongo_doc["article_id"]},
+                {"$set": mongo_doc},
+                upsert=True,
+            )
+
+            if result.upserted_id:
+                feed_new += 1
+            elif result.modified_count:
+                feed_updated += 1
+            else:
+                feed_skip += 1
+
+        total_new += feed_new
+        total_updated += feed_updated
+        total_skip += feed_skip
+
+        print(f"{name}: {feed_new} new, {feed_updated} updated, {feed_skip} unchanged")
+
+if cooldown_skips:
+    print(
+        f"Cooldown active for {len(cooldown_skips)}/{len(RSS_FEEDS)} feeds. "
+        f"Next fetch available in {max(cooldown_skips)}s."
+    )
+
+save_fetch_state(fetch_state)
+print(f"RSS Mongo import complete — {total_new} new, {total_updated} updated, {total_skip} unchanged")
+client.close()

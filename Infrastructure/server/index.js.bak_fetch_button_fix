@@ -1,0 +1,389 @@
+import 'dotenv/config'
+import express from 'express'
+import mongoose from 'mongoose'
+import cors    from 'cors'
+import { connectDB } from './db.js'
+
+import articlesRouter    from './routes/articles.js'
+import screenerRouter    from './routes/screener.js'
+import socialRouter      from './routes/social.js'
+import correlationRouter from './routes/correlation.js'
+import settingsRouter    from './routes/settings.js'
+
+const app  = express()
+const PORT = process.env.PORT || 3001
+
+// ── Middleware ────────────────────────────────────────────
+app.use(cors({ origin: ['http://localhost:5173', 'http://127.0.0.1:5173'] }))
+app.use(express.json({ limit: '2mb' }))
+
+// ── Routes ────────────────────────────────────────────────
+app.use('/api/articles',    articlesRouter)
+app.use('/api/screener',    screenerRouter)
+app.use('/api/social',      socialRouter)
+app.use('/api/correlation', correlationRouter)
+app.use('/api/settings',    settingsRouter)
+
+// ── Health check ──────────────────────────────────────────
+app.get('/api/health', (req, res) => {
+  const { readyState } = mongoose.connection
+  const states = { 0:'disconnected', 1:'connected', 2:'connecting', 3:'disconnecting' }
+  res.json({
+    status:  'ok',
+    db:      states[readyState] || 'unknown',
+    time:    new Date().toISOString(),
+  })
+})
+
+// ── Start ─────────────────────────────────────────────────
+async function start() {
+  await connectDB()
+  
+// Ryan frontend compatibility endpoints
+app.get("/api/status", async (req, res) => {
+  try {
+    const db = mongoose.connection.db;
+    const articles = db.collection("articles");
+    const totalArticles = await articles.countDocuments();
+
+    const latest = await articles.find(
+      {},
+      { projection: { title: 1, source: 1, publish_date: 1, fetched_date: 1 } }
+    ).sort({ fetched_date: -1, publish_date: -1 }).limit(1).toArray();
+
+    res.json({
+      ok: true,
+      status: "ok",
+      connected: true,
+      articles: totalArticles,
+      total: totalArticles,
+      article_count: totalArticles,
+      database: {
+        connected: mongoose.connection.readyState === 1,
+        articles: totalArticles,
+        total: totalArticles,
+        article_count: totalArticles
+      },
+      latest_article: latest[0] || null,
+      time: new Date().toISOString()
+    });
+  } catch (err) {
+    res.status(500).json({
+      ok: false,
+      status: "error",
+      connected: false,
+      articles: 0,
+      total: 0,
+      article_count: 0,
+      database: {
+        connected: false,
+        articles: 0,
+        total: 0,
+        article_count: 0
+      },
+      error: "Failed to load status"
+    });
+  }
+});
+
+app.get("/api/market/status", async (req, res) => {
+  res.json({
+    status: "open",
+    label: "Market data connected",
+    message: "Real-time market status placeholder",
+    updated_at: new Date().toISOString()
+  });
+});
+
+app.get("/api/stats", async (req, res) => {
+  try {
+    const db = mongoose.connection.db;
+    const articles = db.collection("articles");
+
+    const sources = await articles.aggregate([
+      { $group: { _id: "$source", count: { $sum: 1 } } },
+      { $project: { _id: 0, source: "$_id", count: 1 } },
+      { $sort: { count: -1 } }
+    ]).toArray();
+
+    const categories = await articles.aggregate([
+      { $group: { _id: "$category", count: { $sum: 1 } } },
+      { $project: { _id: 0, category: "$_id", count: 1 } },
+      { $sort: { count: -1 } }
+    ]).toArray();
+
+    const total = await articles.countDocuments();
+
+    res.json({ total, sources, categories });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to load stats" });
+  }
+});
+
+app.get("/api/keywords", async (req, res) => {
+  res.json({
+    keywords: [
+      "earnings",
+      "guidance",
+      "upgrade",
+      "downgrade",
+      "merger",
+      "acquisition",
+      "lawsuit",
+      "sec",
+      "fda",
+      "short squeeze",
+      "bankruptcy",
+      "dividend",
+      "offering",
+      "partnership"
+    ]
+  });
+});
+
+
+// Ryan frontend compatibility endpoints
+app.get("/api/status", async (req, res) => {
+  try {
+    const db = mongoose.connection.db;
+    const articles = db.collection("articles");
+    const totalArticles = await articles.countDocuments();
+
+    res.json({
+      ok: true,
+      status: "ok",
+      database: {
+        connected: mongoose.connection.readyState === 1,
+        articles: totalArticles
+      },
+      time: new Date().toISOString()
+    });
+  } catch (err) {
+    res.status(500).json({
+      ok: false,
+      status: "error",
+      database: {
+        connected: false,
+        articles: 0
+      },
+      error: "Failed to load status"
+    });
+  }
+});
+
+app.get("/api/market/status", async (req, res) => {
+  const now = new Date();
+  const day = now.getDay();
+  const hour = now.getHours();
+  const minute = now.getMinutes();
+  const minutes = hour * 60 + minute;
+
+  // Simple placeholder: weekdays, 9:30 AM - 4:00 PM local server time
+  const open = day >= 1 && day <= 5 && minutes >= 570 && minutes <= 960;
+
+  res.json({
+    open,
+    status: open ? "open" : "closed",
+    label: open ? "Market Open" : "Market Closed",
+    updated_at: now.toISOString()
+  });
+});
+
+app.get("/api/stats", async (req, res) => {
+  try {
+    const db = mongoose.connection.db;
+    const articles = db.collection("articles");
+
+    const sources = await articles.aggregate([
+      { $group: { _id: "$source", count: { $sum: 1 } } },
+      { $project: { _id: 0, source: "$_id", count: 1 } },
+      { $sort: { count: -1 } }
+    ]).toArray();
+
+    const categories = await articles.aggregate([
+      { $group: { _id: "$category", count: { $sum: 1 } } },
+      { $project: { _id: 0, category: "$_id", count: 1 } },
+      { $sort: { count: -1 } }
+    ]).toArray();
+
+    const total = await articles.countDocuments();
+
+    res.json({ total, sources, categories });
+  } catch (err) {
+    res.status(500).json({ total: 0, sources: [], categories: [], error: "Failed to load stats" });
+  }
+});
+
+app.get("/api/keywords", async (req, res) => {
+  res.json({
+    keywords: [
+      "earnings",
+      "guidance",
+      "upgrade",
+      "downgrade",
+      "merger",
+      "acquisition",
+      "lawsuit",
+      "sec",
+      "fda",
+      "short squeeze",
+      "bankruptcy",
+      "dividend",
+      "offering",
+      "partnership",
+      "buyout",
+      "halt",
+      "investigation",
+      "clinical trial",
+      "approval"
+    ]
+  });
+});
+
+app.post("/api/fetch", async (req, res) => {
+  const t0 = Date.now();
+
+  try {
+    const db = mongoose.connection.db;
+    const articles = db.collection("articles");
+    const totalArticles = await articles.countDocuments();
+
+    // V1 compatibility: frontend Fetch button refreshes dashboard state.
+    // The actual RSS importer is still run by the Python worker/script.
+    res.json({
+      ok: true,
+      new_articles: 0,
+      total_articles: totalArticles,
+      ms: Date.now() - t0,
+      message: "Fetch endpoint connected. RSS worker handles ingestion."
+    });
+  } catch (err) {
+    res.status(500).json({
+      ok: false,
+      new_articles: 0,
+      ms: Date.now() - t0,
+      error: "Fetch endpoint failed"
+    });
+  }
+});
+
+app.get("/api/watch", async (req, res) => {
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+
+  const interval = Number(req.query.interval || 60);
+
+  res.write(`event: start\n`);
+  res.write(`data: ${JSON.stringify({ message: `Auto-watch started. Interval: ${interval}s` })}\n\n`);
+
+  const timer = setInterval(async () => {
+    try {
+      const db = mongoose.connection.db;
+      const totalArticles = await db.collection("articles").countDocuments();
+
+      res.write(`event: line\n`);
+      res.write(`data: ${JSON.stringify({ text: `Cycle #${Date.now()} — ${totalArticles} articles currently stored` })}\n\n`);
+    } catch (err) {
+      res.write(`event: error\n`);
+      res.write(`data: ${JSON.stringify({ message: "Watch cycle failed" })}\n\n`);
+    }
+  }, interval * 1000);
+
+  req.on("close", () => {
+    clearInterval(timer);
+  });
+});
+// End Ryan frontend compatibility endpoints
+
+
+
+app.get("/api/sources/health", async (req, res) => {
+  try {
+    const db = mongoose.connection.db;
+    const rows = await db.collection("articles").aggregate([
+      {
+        $group: {
+          _id: "$source",
+          count: { $sum: 1 },
+          latest_fetch: { $max: "$fetched_date" },
+          latest_publish: { $max: "$publish_date" }
+        }
+      },
+      { $sort: { count: -1 } }
+    ]).toArray();
+
+    const working = rows.map((r) => ({
+      source: r._id,
+      status: "working",
+      count: r.count,
+      latest_fetch: r.latest_fetch,
+      latest_publish: r.latest_publish
+    }));
+
+    const knownSources = [
+      "CNBC Markets",
+      "CNBC Finance",
+      "MarketWatch Top",
+      "MarketWatch Breaking",
+      "Yahoo Finance",
+      "Seeking Alpha",
+      "The Motley Fool",
+      "BBC Business",
+      "Federal Reserve",
+      "Forbes Business",
+      "ZeroHedge",
+      "Business Insider",
+      "SEC EDGAR 8-K",
+      "SEC EDGAR 10-Q",
+      "SEC EDGAR 10-K",
+      "PR Newswire",
+      "GlobeNewswire Earnings",
+      "GlobeNewswire M&A",
+      "CoinDesk",
+      "CoinTelegraph",
+      "OilPrice",
+      "Reuters Business",
+      "Reuters Finance",
+      "Investopedia",
+      "Benzinga",
+      "FDA Drug Approvals",
+      "BusinessWire",
+      "AccessWire",
+      "TradingView News Flow"
+    ];
+
+    const workingNames = new Set(working.map((r) => r.source));
+
+    const missing = knownSources
+      .filter((source) => !workingNames.has(source))
+      .map((source) => ({
+        source,
+        status: source === "TradingView News Flow" ? "planned" : "needs_fix",
+        count: 0,
+        latest_fetch: null,
+        latest_publish: null
+      }));
+
+    res.json({
+      working_count: working.length,
+      missing_count: missing.length,
+      sources: [...working, ...missing]
+    });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to load source health", detail: err.message });
+  }
+});
+
+app.listen(PORT, () => {
+    console.log()
+    console.log('  ⚡ FlashFeed API')
+    console.log('  ─────────────────────────────────────')
+    console.log('  Server  →  http://localhost:' + PORT)
+    console.log('  Health  →  http://localhost:' + PORT + '/api/health')
+    console.log('  Docs    →  README-MONGODB.md')
+    console.log()
+  })
+}
+
+start()

@@ -1,0 +1,38 @@
+services:
+  mongo:
+    image: mongo:7
+    container_name: feedflash-mongo
+    ports:
+      - "27017:27017"
+    volumes:
+      - feedflash_mongo_data:/data/db
+
+  backend:
+    build:
+      context: .
+      dockerfile: Infrastructure/server/Dockerfile
+    container_name: feedflash-backend
+    ports:
+      - "3001:3001"
+    environment:
+      PORT: 3001
+      MONGODB_URI: mongodb://mongo:27017/feedflash
+      NODE_ENV: development
+    depends_on:
+      - mongo
+
+  rss-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.rss
+    container_name: feedflash-rss-worker
+    environment:
+      MONGODB_URI: mongodb://mongo:27017/feedflash
+      MONGO_DB: feedflash
+    depends_on:
+      - mongo
+    profiles:
+      - worker
+
+volumes:
+  feedflash_mongo_data:
