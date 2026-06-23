@@ -45,8 +45,14 @@ export function TickerMirror({ ticker, row, colSpan, onClose }: Props) {
   const [grokText, setGrokText] = useState<string | null>(null)
   const [grokLoading, setGrokLoading] = useState(false)
 
+  const [activeTab, setActiveTab] = useState<'news' | 'reddit'>('news')
+
   const { data: chartData } = useSWR(`/api/charts/${ticker}?range=5d&interval=30m`, fetcher)
   const { data: newsData } = useSWR(`/api/articles?ticker=${ticker}&limit=5&recent_days=30`, fetcher)
+  const { data: redditData } = useSWR(
+    activeTab === 'reddit' ? `/api/reddit/posts/${ticker}?limit=8` : null,
+    fetcher
+  )
 
   const candles = chartData?.candles ?? []
   const bollinger = chartData?.bollinger
@@ -190,45 +196,87 @@ export function TickerMirror({ ticker, row, colSpan, onClose }: Props) {
             </div>
           </div>
 
-          {/* News */}
-          <div className="border-t border-border/20 px-4 py-3">
-            <div className="text-[10px] uppercase text-neutral mb-2 font-medium tracking-wide">Recent News</div>
-            {news.length === 0 ? (
-              <div className="text-xs text-neutral">No recent news found for {ticker}.</div>
-            ) : (
-              <div className="flex flex-col gap-2">
-                {news.map(a => (
-                  <a
-                    key={a.id || a.article_id || a.url}
-                    href={a.url || '#'}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="flex items-start gap-2 group"
-                  >
-                    <span className={`shrink-0 mt-0.5 text-[9px] font-semibold uppercase px-1.5 py-0.5 rounded ${
-                      a.sentiment === 'bullish'
-                        ? 'bg-emerald-500/15 text-emerald-400'
-                        : a.sentiment === 'bearish'
-                        ? 'bg-red-500/15 text-red-400'
-                        : 'bg-slate-600/20 text-slate-400'
-                    }`}>
-                      {a.sentiment ?? 'N'}
-                    </span>
-                    <div className="min-w-0">
-                      <div className="text-xs text-slate-200 group-hover:text-white leading-snug line-clamp-1">
-                        {a.title}
-                      </div>
-                      <div className="text-[10px] text-neutral mt-0.5">
-                        {a.source}
-                        {a.publish_date
-                          ? ` · ${new Date(a.publish_date * 1000).toLocaleDateString()}`
-                          : ''}
-                      </div>
-                    </div>
-                  </a>
-                ))}
-              </div>
-            )}
+          {/* News / Reddit tabs */}
+          <div className="border-t border-border/20">
+            <div className="flex items-center border-b border-border/20 px-4">
+              {(['news', 'reddit'] as const).map(tab => (
+                <button
+                  key={tab}
+                  onClick={() => setActiveTab(tab)}
+                  className={`px-3 py-2 text-[11px] font-medium capitalize border-b-2 -mb-px transition-colors ${
+                    activeTab === tab
+                      ? 'border-accent text-white'
+                      : 'border-transparent text-neutral hover:text-white'
+                  }`}
+                >
+                  {tab === 'news' ? 'News' : 'Reddit Posts'}
+                </button>
+              ))}
+            </div>
+
+            <div className="px-4 py-3">
+              {activeTab === 'news' && (
+                news.length === 0 ? (
+                  <div className="text-xs text-neutral">No recent news found for {ticker}.</div>
+                ) : (
+                  <div className="flex flex-col gap-2">
+                    {news.map(a => (
+                      <a
+                        key={a.id || a.article_id || a.url}
+                        href={a.url || '#'}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="flex items-start gap-2 group"
+                      >
+                        <span className={`shrink-0 mt-0.5 text-[9px] font-semibold uppercase px-1.5 py-0.5 rounded ${
+                          a.sentiment === 'bullish' ? 'bg-emerald-500/15 text-emerald-400'
+                          : a.sentiment === 'bearish' ? 'bg-red-500/15 text-red-400'
+                          : 'bg-slate-600/20 text-slate-400'
+                        }`}>{a.sentiment ?? 'N'}</span>
+                        <div className="min-w-0">
+                          <div className="text-xs text-slate-200 group-hover:text-white leading-snug line-clamp-1">{a.title}</div>
+                          <div className="text-[10px] text-neutral mt-0.5">
+                            {a.source}{a.publish_date ? ` · ${new Date(a.publish_date * 1000).toLocaleDateString()}` : ''}
+                          </div>
+                        </div>
+                      </a>
+                    ))}
+                  </div>
+                )
+              )}
+
+              {activeTab === 'reddit' && (
+                !redditData ? (
+                  <div className="text-xs text-neutral animate-pulse">Loading Reddit posts…</div>
+                ) : !redditData.ok ? (
+                  <div className="text-xs text-neutral space-y-1">
+                    <span className="text-yellow-400 font-medium block">Reddit not configured.</span>
+                    <span>Add <code className="text-accent bg-bg/50 px-1 rounded">REDDIT_CLIENT_ID</code> and <code className="text-accent bg-bg/50 px-1 rounded">REDDIT_CLIENT_SECRET</code> to <code className="text-accent bg-bg/50 px-1 rounded">.env</code></span>
+                    <span className="block text-slate-500">Create a "script" app at <span className="text-sky-400">reddit.com/prefs/apps</span>, then restart the backend container.</span>
+                  </div>
+                ) : (redditData.posts ?? []).length === 0 ? (
+                  <div className="text-xs text-neutral">No Reddit posts found for {ticker} this week.</div>
+                ) : (
+                  <div className="flex flex-col gap-2">
+                    {(redditData.posts as any[]).map((p) => (
+                      <a key={p.id} href={p.url} target="_blank" rel="noreferrer" className="flex items-start gap-2 group">
+                        <div className="shrink-0 mt-0.5 flex flex-col items-center min-w-[30px]">
+                          <span className="text-orange-400 text-[10px] font-bold leading-none">▲</span>
+                          <span className="text-[10px] text-neutral font-mono">{p.score >= 1000 ? `${(p.score / 1000).toFixed(1)}k` : p.score}</span>
+                        </div>
+                        <div className="min-w-0">
+                          <div className="text-xs text-slate-200 group-hover:text-white leading-snug line-clamp-1">{p.title}</div>
+                          <div className="text-[10px] text-neutral mt-0.5">
+                            r/{p.subreddit} · {p.num_comments} comments{p.created_utc ? ` · ${new Date(p.created_utc * 1000).toLocaleDateString()}` : ''}
+                          </div>
+                          {p.preview && <div className="text-[10px] text-slate-500 mt-0.5 line-clamp-1">{p.preview}</div>}
+                        </div>
+                      </a>
+                    ))}
+                  </div>
+                )
+              )}
+            </div>
           </div>
         </div>
       </td>

@@ -5423,6 +5423,106 @@ app.get('/api/grok/status', (req, res) => {
   res.json({ configured: !!GROK_API_KEY, model: GROK_MODEL })
 })
 
+// ── Reddit OAuth API ─────────────────────────────────────────────────────────
+
+const REDDIT_CLIENT_ID     = process.env.REDDIT_CLIENT_ID     || ''
+const REDDIT_CLIENT_SECRET = process.env.REDDIT_CLIENT_SECRET || ''
+const REDDIT_USER_AGENT    = 'FlashFeed/1.0 (financial dashboard; contact via github.com/Rybread15325)'
+
+let _redditToken       = null
+let _redditTokenExpiry = 0
+
+async function getRedditToken() {
+  if (_redditToken && Date.now() < _redditTokenExpiry) return _redditToken
+  if (!REDDIT_CLIENT_ID || !REDDIT_CLIENT_SECRET) return null
+  try {
+    const auth = Buffer.from(`${REDDIT_CLIENT_ID}:${REDDIT_CLIENT_SECRET}`).toString('base64')
+    const resp = await fetch('https://www.reddit.com/api/v1/access_token', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Basic ${auth}`,
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'User-Agent': REDDIT_USER_AGENT,
+      },
+      body: 'grant_type=client_credentials',
+    })
+    if (!resp.ok) { console.warn('Reddit token fetch failed:', resp.status); return null }
+    const data = await resp.json()
+    _redditToken = data.access_token
+    _redditTokenExpiry = Date.now() + Math.max(0, (Number(data.expires_in) - 60)) * 1000
+    return _redditToken
+  } catch (e) {
+    console.warn('Reddit token error:', e.message)
+    return null
+  }
+}
+
+app.get('/api/reddit/status', async (req, res) => {
+  const configured = !!(REDDIT_CLIENT_ID && REDDIT_CLIENT_SECRET)
+  let tokenOk = false
+  if (configured) {
+    const tok = await getRedditToken()
+    tokenOk = !!tok
+  }
+  res.json({
+    configured,
+    token_ok: tokenOk,
+    client_id_set: !!REDDIT_CLIENT_ID,
+    client_secret_set: !!REDDIT_CLIENT_SECRET,
+  })
+})
+
+app.get('/api/reddit/posts/:ticker', async (req, res) => {
+  const ticker = (req.params.ticker || '').toUpperCase().trim()
+  if (!ticker) return res.status(400).json({ ok: false, posts: [], error: 'ticker required' })
+
+  const limit = Math.min(Number(req.query.limit) || 10, 25)
+
+  if (!REDDIT_CLIENT_ID || !REDDIT_CLIENT_SECRET) {
+    return res.json({
+      ok: false,
+      posts: [],
+      error: 'Reddit OAuth not configured. Add REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET to .env (get from reddit.com/prefs/apps)',
+    })
+  }
+
+  try {
+    const token = await getRedditToken()
+    if (!token) return res.json({ ok: false, posts: [], error: 'Failed to obtain Reddit access token' })
+
+    const query = encodeURIComponent(`${ticker} stock`)
+    const url   = `https://oauth.reddit.com/search.json?q=${query}&sort=relevance&limit=${limit}&t=week&type=link`
+
+    const resp = await fetch(url, {
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'User-Agent': REDDIT_USER_AGENT,
+      },
+    })
+
+    if (!resp.ok) {
+      return res.json({ ok: false, posts: [], error: `Reddit API error ${resp.status}` })
+    }
+
+    const data  = await resp.json()
+    const posts = (data?.data?.children ?? []).map(c => ({
+      id:           c.data.id,
+      title:        c.data.title,
+      subreddit:    c.data.subreddit,
+      author:       c.data.author,
+      score:        c.data.score,
+      num_comments: c.data.num_comments,
+      url:          `https://www.reddit.com${c.data.permalink}`,
+      preview:      (c.data.selftext || '').slice(0, 180).trim() || null,
+      created_utc:  c.data.created_utc,
+    }))
+
+    return res.json({ ok: true, ticker, posts })
+  } catch (e) {
+    return res.json({ ok: false, posts: [], error: String(e.message || e) })
+  }
+})
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 app.listen(PORT, () => {
