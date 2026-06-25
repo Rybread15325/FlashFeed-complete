@@ -99,9 +99,11 @@ export function ScreenerTable({ rows, isLoading, viewMode, pageOffset = 0, onSor
               {columns.map(col => (
                 <th
                   key={col.key}
-                  className={`px-2 py-2 text-left text-[10px] text-neutral uppercase tracking-wide font-medium whitespace-nowrap ${
-                    col.sortable && onSort ? 'cursor-pointer hover:text-white select-none' : ''
-                  } ${sortKey === col.key ? 'text-accent' : ''}`}
+                  className={`px-2 py-2 text-[10px] text-neutral uppercase tracking-wide font-medium whitespace-nowrap ${
+                    col.key === 'no' ? 'w-8 text-right' : 'text-left'
+                  } ${col.sortable && onSort ? 'cursor-pointer hover:text-white select-none' : ''} ${
+                    sortKey === col.key ? 'text-accent' : ''
+                  }`}
                   onClick={() => col.sortable && onSort && onSort(col.key)}
                 >
                   {col.label}

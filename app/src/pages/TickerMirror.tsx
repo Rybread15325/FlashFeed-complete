@@ -54,10 +54,12 @@ export function TickerMirror({ ticker, row, colSpan, onClose }: Props) {
     fetcher
   )
 
+  const chartLoading = chartData === undefined
   const candles = chartData?.candles ?? []
   const bollinger = chartData?.bollinger
   const predicted = chartData?.predicted ?? []
   const news: Article[] = newsData?.articles ?? []
+  const newsCount = news.length
 
   const w52range =
     row.low_52w != null && row.high_52w != null
@@ -162,21 +164,22 @@ export function TickerMirror({ ticker, row, colSpan, onClose }: Props) {
           <div className="flex gap-0 divide-x divide-border/20">
             <div className="flex-1 min-w-0 p-3">
               <div className="h-[280px]">
-                {candles.length > 0
-                  ? (
-                    <CandlestickChart
-                      candles={candles}
-                      bollinger={bollinger}
-                      predicted={predicted}
-                      newsEvents={[]}
-                    />
-                  )
-                  : (
-                    <div className="h-full flex items-center justify-center text-neutral text-xs animate-pulse">
-                      Loading chart…
-                    </div>
-                  )
-                }
+                {chartLoading ? (
+                  <div className="h-full flex items-center justify-center text-neutral text-xs animate-pulse">
+                    Loading chart…
+                  </div>
+                ) : candles.length > 0 ? (
+                  <CandlestickChart
+                    candles={candles}
+                    bollinger={bollinger}
+                    predicted={predicted}
+                    newsEvents={[]}
+                  />
+                ) : (
+                  <div className="h-full flex items-center justify-center text-neutral text-xs">
+                    No chart data available for {ticker}
+                  </div>
+                )}
               </div>
             </div>
 
@@ -209,7 +212,9 @@ export function TickerMirror({ ticker, row, colSpan, onClose }: Props) {
                       : 'border-transparent text-neutral hover:text-white'
                   }`}
                 >
-                  {tab === 'news' ? 'News' : 'Reddit Posts'}
+                  {tab === 'news'
+                    ? `News${newsCount > 0 ? ` (${newsCount})` : ''}`
+                    : 'Reddit Posts'}
                 </button>
               ))}
             </div>

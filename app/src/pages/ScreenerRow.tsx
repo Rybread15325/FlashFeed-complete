@@ -55,7 +55,8 @@ export function ScreenerRow({ row, columns, rowIndex, colSpan, expanded, onExpan
   const renderCell = (key: string) => {
     switch (key) {
       case 'no':
-        return <span className="text-neutral font-mono">{rowIndex}</span>
+        return <span className="text-slate-500 font-mono text-[11px]">{rowIndex}</span>
+
       case 'ticker':
         return (
           <button
@@ -68,30 +69,41 @@ export function ScreenerRow({ row, columns, rowIndex, colSpan, expanded, onExpan
             {row.ticker}
           </button>
         )
+
       case 'company':
-        return <span className="text-slate-300 truncate block max-w-[150px]">{row.company || row.industry || '—'}</span>
+        return <span className="text-slate-300 truncate block max-w-[160px]">{row.company || row.industry || '—'}</span>
+
       case 'exchange':
       case 'country':
       case 'index':
       case 'market_cap_bucket':
       case 'earnings_date':
         return <span className="text-neutral whitespace-nowrap">{(row as any)[key] ?? '—'}</span>
+
       case 'price':
         return <span className="font-mono">{row.price != null ? `$${row.price.toFixed(2)}` : '—'}</span>
+
       case 'change_pct':
         return (
-          <span className={clsx('font-mono', (row.change_pct ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+          <span className={clsx('font-mono font-medium', (row.change_pct ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400')}>
             {row.change_pct != null ? `${row.change_pct >= 0 ? '+' : ''}${row.change_pct.toFixed(2)}%` : '—'}
           </span>
         )
+
       case 'volume':
         return <span className="font-mono text-neutral">{fmtCompact(row.volume)}</span>
+
       case 'avg_volume':
         return <span className="font-mono text-neutral">{fmtCompact((row as any).avg_volume)}</span>
-      case 'rel_volume':
-        return <span className="font-mono text-neutral">{fmtNumber((row as any).rel_volume, 2)}x</span>
+
+      case 'rel_volume': {
+        const rv = (row as any).rel_volume
+        return <span className={clsx('font-mono', rv >= 2 ? 'text-yellow-400' : 'text-neutral')}>{rv != null ? `${Number(rv).toFixed(2)}x` : '—'}</span>
+      }
+
       case 'market_cap':
         return <span className="font-mono text-neutral">{fmtCompact((row as any).market_cap)}</span>
+
       case 'pe_ratio':
       case 'forward_pe':
       case 'peg':
@@ -101,57 +113,76 @@ export function ScreenerRow({ row, columns, rowIndex, colSpan, expanded, onExpan
       case 'beta':
       case 'atr':
         return <span className="font-mono text-neutral">{fmtNumber((row as any)[key], key === 'pe_ratio' || key === 'forward_pe' ? 1 : 2)}</span>
+
       case 'sector':
-        return <span className="text-neutral truncate block max-w-[120px]">{row.sector ?? '—'}</span>
+        return <span className="text-neutral truncate block max-w-[120px]" title={row.sector ?? ''}>{row.sector ?? '—'}</span>
+
       case 'industry':
-        return <span className="text-neutral truncate block max-w-[120px]">{row.industry ?? '—'}</span>
-      case 'avg_sentiment':
-        const avgSentiment = row.avg_sentiment ?? 0
+        return <span className="text-neutral truncate block max-w-[120px]" title={row.industry ?? ''}>{row.industry ?? '—'}</span>
+
+      case 'avg_sentiment': {
+        const v = row.avg_sentiment ?? 0
         return (
           <div className="flex items-center gap-1.5">
-            <span className={clsx('font-mono', avgSentiment >= 0.2 ? 'text-emerald-400' : avgSentiment <= -0.2 ? 'text-red-400' : 'text-neutral')}>
-              {avgSentiment.toFixed(2)}
+            <span className={clsx('font-mono', v >= 0.2 ? 'text-emerald-400' : v <= -0.2 ? 'text-red-400' : 'text-neutral')}>
+              {v.toFixed(2)}
             </span>
             {sentBar(row.bullish_count ?? 0, row.bearish_count ?? 0, row.neutral_count ?? 0)}
           </div>
         )
-      case 'social_sentiment':
-        const socialSentiment = row.social_sentiment ?? 0
+      }
+
+      case 'social_sentiment': {
+        const v = row.social_sentiment ?? 0
         return (
-          <span className={clsx('font-mono', socialSentiment >= 0.2 ? 'text-emerald-400' : socialSentiment <= -0.2 ? 'text-red-400' : 'text-neutral')}>
-            {socialSentiment.toFixed(2)}
+          <span className={clsx('font-mono', v >= 0.2 ? 'text-emerald-400' : v <= -0.2 ? 'text-red-400' : 'text-neutral')}>
+            {v.toFixed(2)}
           </span>
         )
-      case 'social_message_sentiment':
-        const stocktwitsSentiment = row.social_message_sentiment ?? 0
+      }
+
+      case 'social_message_sentiment': {
+        const v = row.social_message_sentiment ?? 0
         return (
-          <span className={clsx('font-mono', stocktwitsSentiment >= 0.2 ? 'text-emerald-400' : stocktwitsSentiment <= -0.2 ? 'text-red-400' : 'text-neutral')}>
-            {stocktwitsSentiment.toFixed(2)}
+          <span className={clsx('font-mono', v >= 0.2 ? 'text-emerald-400' : v <= -0.2 ? 'text-red-400' : 'text-neutral')}>
+            {v.toFixed(2)}
           </span>
         )
+      }
+
       case 'social_message_density':
         return <span className="font-mono text-neutral">{(row.social_message_density ?? 0).toFixed(3)}/m</span>
+
       case 'stocktwits_message_count':
         return <span className="font-mono text-neutral">{row.stocktwits_message_count ?? 0}</span>
-      case 'structured_sentiment':
-        const structuredSentiment = row.structured_sentiment ?? 0
+
+      case 'structured_sentiment': {
+        const v = row.structured_sentiment ?? 0
         return (
-          <span className={clsx('font-mono', structuredSentiment >= 0.2 ? 'text-emerald-400' : structuredSentiment <= -0.2 ? 'text-red-400' : 'text-neutral')}>
-            {structuredSentiment.toFixed(2)}
+          <span className={clsx('font-mono', v >= 0.2 ? 'text-emerald-400' : v <= -0.2 ? 'text-red-400' : 'text-neutral')}>
+            {v.toFixed(2)}
           </span>
         )
+      }
+
       case 'message_count':
         return <span className="font-mono text-neutral">{row.message_count ?? 0}</span>
+
       case 'rolling_window_minutes':
         return <span className="font-mono text-neutral">{(row as any).rolling_window_minutes ?? '—'}m</span>
+
       case 'news_article_count':
         return <span className="font-mono text-neutral">{row.news_article_count ?? 0}</span>
+
       case 'bullish_count':
         return <span className="font-mono text-emerald-400">{row.bullish_count ?? 0}</span>
+
       case 'bearish_count':
         return <span className="font-mono text-red-400">{row.bearish_count ?? 0}</span>
+
       case 'target_price':
         return <span className="font-mono text-neutral">{(row as any).target_price != null ? `$${Number((row as any).target_price).toFixed(2)}` : '—'}</span>
+
       case 'dividend_yield':
       case 'eps_growth_this_y':
       case 'eps_growth_next_y':
@@ -172,12 +203,32 @@ export function ScreenerRow({ row, columns, rowIndex, colSpan, expanded, onExpan
       case 'sma50':
       case 'sma200':
       case 'gap':
-        return <span className={`font-mono ${pctTone((row as any)[key])}`}>{fmtPct((row as any)[key], ['perf_week','perf_month','perf_quarter','perf_half','perf_year','perf_ytd','sma20','sma50','sma200','gap','eps_growth_this_y','eps_growth_next_y','sales_growth'].includes(key))}</span>
-      case 'rsi':
+        return (
+          <span className={`font-mono ${pctTone((row as any)[key])}`}>
+            {fmtPct((row as any)[key], ['perf_week','perf_month','perf_quarter','perf_half','perf_year','perf_ytd',
+              'sma20','sma50','sma200','gap','eps_growth_this_y','eps_growth_next_y','sales_growth'].includes(key))}
+          </span>
+        )
+
+      case 'rsi': {
         const rsi = Number((row as any).rsi ?? 0)
-        return <span className={clsx('font-mono', rsi >= 70 ? 'text-red-400' : rsi <= 30 ? 'text-emerald-400' : 'text-neutral')}>{fmtNumber(rsi, 1)}</span>
+        return (
+          <span className={clsx('font-mono', rsi >= 70 ? 'text-red-400' : rsi <= 30 ? 'text-emerald-400' : 'text-neutral')}>
+            {fmtNumber(rsi, 1)}
+          </span>
+        )
+      }
+
       case 'analyst':
-        return <span className={clsx('font-mono', row.analyst === 'Buy' || row.analyst === 'Strong Buy' ? 'text-emerald-400' : row.analyst === 'Sell' ? 'text-red-400' : 'text-neutral')}>{row.analyst ?? '—'}</span>
+        return (
+          <span className={clsx('font-mono text-[11px]',
+            row.analyst === 'Buy' || row.analyst === 'Strong Buy' ? 'text-emerald-400' :
+            row.analyst === 'Sell' || row.analyst === 'Strong Sell' ? 'text-red-400' : 'text-neutral'
+          )}>
+            {row.analyst ?? '—'}
+          </span>
+        )
+
       case 'sources':
         return (
           <div className="flex gap-0.5 flex-wrap">
@@ -186,6 +237,7 @@ export function ScreenerRow({ row, columns, rowIndex, colSpan, expanded, onExpan
             ))}
           </div>
         )
+
       default:
         return <span className="text-neutral">—</span>
     }
@@ -195,11 +247,12 @@ export function ScreenerRow({ row, columns, rowIndex, colSpan, expanded, onExpan
     <>
       <tr
         className={clsx(
-          'hover:bg-card-hover transition-colors cursor-pointer',
-          expanded && 'bg-card-hover'
+          'transition-colors cursor-pointer select-none',
+          expanded ? 'bg-[#0c1a2e]' : 'hover:bg-card-hover'
         )}
         onClick={e => {
-          if ((e.target as HTMLElement).tagName === 'BUTTON') return
+          // Ignore clicks that originate from inside a button (handles nested spans too)
+          if ((e.target as HTMLElement).closest('button')) return
           onExpand()
         }}
       >

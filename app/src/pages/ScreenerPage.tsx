@@ -288,7 +288,7 @@ export function ScreenerPage() {
   const gainers = filtered.filter(t => (t.change_pct ?? 0) > 0).length
   const losers = filtered.filter(t => (t.change_pct ?? 0) < 0).length
   const unchanged = filtered.filter(t => (t.change_pct ?? 0) === 0).length
-  const highRelVol = filtered.filter(t => ((t as any).rel_volume ?? 0) >= 1.5).length
+
   const activeSocialRows = filtered.filter(t => Number(t.message_count ?? t.stocktwits_message_count ?? 0) > 0)
   const activeSocialCount = activeSocialRows.length
   const totalSocialMessages = filtered.reduce((sum, row) => sum + Number(row.message_count ?? row.stocktwits_message_count ?? 0), 0)
@@ -416,7 +416,10 @@ export function ScreenerPage() {
           onClick={() => setShowFilters(s => !s)}
           className={`text-xs px-2.5 py-1 rounded border transition-colors ${showFilters ? 'bg-accent/10 border-accent/40 text-accent' : 'border-border text-neutral hover:text-white hover:border-accent/50'}`}
         >
-          More Filters {Object.keys(filters).filter(k => !['exchange','sector','industry','country','market_cap'].includes(k)).length > 0 ? `(${Object.keys(filters).filter(k => !['exchange','sector','industry','country','market_cap'].includes(k)).length})` : ''}
+          {(() => {
+            const advCount = Object.keys(filters).filter(k => !['exchange','sector','industry','country','market_cap'].includes(k)).length
+            return advCount > 0 ? `More Filters (${advCount})` : 'More Filters'
+          })()}
         </button>
 
         {(Object.keys(filters).length > 0 || signal || search) && (
@@ -467,10 +470,6 @@ export function ScreenerPage() {
           setActiveTab={setFilterTab}
         />
       )}
-
-      <div className="flex items-center justify-between gap-3 mb-3">
-        <h1 className="text-white font-semibold text-lg">Market Screener</h1>
-      </div>
 
       <div className="grid grid-cols-2 md:grid-cols-5 gap-2 mb-3">
         <ScreenerMetric label="Universe" value={compact(filtered.length)} />
