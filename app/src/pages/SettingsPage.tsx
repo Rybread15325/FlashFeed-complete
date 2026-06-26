@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { getCustomStocks, addCustomStock, removeCustomStock, normalizeTicker } from '../lib/stocks'
+import { useLanguage, LANGUAGES } from '../lib/language'
 
 type KeywordRow = {
   keyword: string
@@ -66,6 +67,8 @@ async function jsonFetch(url: string, options?: RequestInit) {
 }
 
 export function SettingsPage() {
+  const { language, setLanguage } = useLanguage()
+  const [translateStatus, setTranslateStatus] = useState<{ google_translate_configured?: boolean } | null>(null)
   const [keywords, setKeywords] = useState<KeywordRow[]>([])
   const [structured, setStructured] = useState<SourceRow[]>([])
   const [customSources, setCustomSources] = useState<SourceRow[]>([])
@@ -87,12 +90,13 @@ export function SettingsPage() {
 
   const load = async () => {
     setError(null)
-    const [kw, src, conn, health, disk] = await Promise.all([
+    const [kw, src, conn, health, disk, txStatus] = await Promise.all([
       jsonFetch('/api/settings/keywords'),
       jsonFetch('/api/settings/sources'),
       jsonFetch('/api/settings/connections'),
       jsonFetch('/api/sources/health').catch(() => ({ sources: [] })),
       jsonFetch('/api/disk/status').catch(() => ({})),
+      jsonFetch('/api/translate/status').catch(() => ({})),
     ])
     setKeywords(kw.keywords || [])
     setStructured(src.structured || [])
@@ -101,6 +105,7 @@ export function SettingsPage() {
     setSourceHealth(health || {})
     setDiskStatus(disk || {})
     setDiskTtl(disk?.ttl_days ?? 3)
+    setTranslateStatus(txStatus || {})
   }
 
   useEffect(() => {
@@ -244,6 +249,57 @@ export function SettingsPage() {
 
       {error && <div className="border border-red-500/40 bg-red-500/10 text-red-300 rounded-lg p-3 text-sm">{error}</div>}
       {saved && <div className="border border-emerald-500/40 bg-emerald-500/10 text-emerald-300 rounded-lg p-3 text-sm">{saved}</div>}
+
+      {/* Language Section */}
+      <section className="bg-surface border border-border rounded-lg p-4">
+        <div className="mb-4">
+          <h2 className="text-white font-medium flex items-center gap-2">
+            <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4 text-accent" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/>
+              <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+            </svg>
+            Language
+          </h2>
+          <p className="text-xs text-neutral mt-1">
+            Translate news article titles and content. Uses Google Translate when configured, otherwise uses built-in glossary.
+            {translateStatus?.google_translate_configured
+              ? <span className="text-emerald-400 ml-1">● Google Translate active</span>
+              : <span className="text-neutral ml-1">● Add GOOGLE_TRANSLATE_API_KEY to .env for full translation</span>
+            }
+          </p>
+        </div>
+        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-2">
+          {LANGUAGES.map(lang => (
+            <button
+              key={lang.code}
+              onClick={() => setLanguage(lang.code)}
+              className={`flex items-center gap-2 px-3 py-2.5 rounded-lg border text-sm transition-all ${
+                language === lang.code
+                  ? 'border-accent bg-accent/10 text-white'
+                  : 'border-border text-neutral hover:border-accent/50 hover:text-white'
+              }`}
+            >
+              <span className="text-base leading-none">{lang.flag}</span>
+              <div className="min-w-0 text-left">
+                <div className="font-medium text-xs leading-tight truncate">{lang.label}</div>
+                <div className="text-[10px] text-neutral leading-tight truncate">{lang.nativeLabel}</div>
+              </div>
+            </button>
+          ))}
+        </div>
+        {language !== 'en' && (
+          <div className="mt-3 flex items-center gap-2">
+            <span className="text-xs text-neutral">Active:</span>
+            <span className="text-xs text-white font-medium">{LANGUAGES.find(l => l.code === language)?.label || language}</span>
+            <button
+              onClick={() => setLanguage('en')}
+              className="text-xs text-neutral hover:text-white border border-border rounded px-2 py-0.5 ml-auto"
+            >
+              Reset to English
+            </button>
+          </div>
+        )}
+      </section>
 
       <section className="bg-surface border border-border rounded-lg p-4">
         <div className="mb-3">

@@ -250,7 +250,7 @@ app.get('/api/ai/overview', async (req, res) => {
   }
 })
 
-const SUPPORTED_TRANSLATION_LANGUAGES = new Set(["en", "es", "fr", "de", "pt", "ja"])
+const SUPPORTED_TRANSLATION_LANGUAGES = new Set(["en", "es", "fr", "de", "pt", "ja", "zh", "hi", "ar", "bn", "ru", "ko"])
 const UNSUPPORTED_TRANSLATION_SCRIPT_RE = /[\u3400-\u9FFF\uF900-\uFAFF\u3040-\u30FF\uAC00-\uD7AF]/
 
 const FINANCE_GLOSSARY = {
@@ -572,7 +572,26 @@ function englishFallbackTranslate(text) {
   return translated === original ? `English translation pending: ${original}` : translated
 }
 
+async function translateWithGoogle(text, targetLanguage) {
+  const apiKey = process.env.GOOGLE_TRANSLATE_API_KEY
+  if (!apiKey) return null
+  const url = `https://translation.googleapis.com/language/translate/v2?key=${apiKey}`
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ q: text, target: targetLanguage, format: 'text' }),
+  })
+  if (!response.ok) throw new Error(`Google Translate API ${response.status}`)
+  const data = await response.json()
+  return data?.data?.translations?.[0]?.translatedText || null
+}
+
 async function translateWithProvider(text, targetLanguage) {
+  // Try Google Translate first if key is set
+  const googleResult = await translateWithGoogle(text, targetLanguage)
+  if (googleResult) return googleResult
+
+  // Fall back to custom translation provider URL
   const url = process.env.TRANSLATION_API_URL
   if (!url || typeof fetch !== "function") return null
 
@@ -1948,10 +1967,8 @@ app.post("/api/translate", async (req, res) => {
     const targetLanguage = String(req.body.target_language || req.body.target || "en").toLowerCase()
 
     if (!text) return res.status(400).json({ ok: false, error: "text is required" })
-    if (!SUPPORTED_TRANSLATION_LANGUAGES.has(targetLanguage)) {
-      return res.status(400).json({ ok: false, error: "unsupported target language" })
-    }
 
+    // Try Google Translate / external provider first
     try {
       const providerTranslation = await translateWithProvider(text, targetLanguage)
       if (providerTranslation) {
@@ -1959,22 +1976,64 @@ app.post("/api/translate", async (req, res) => {
           ok: true,
           translated_text: providerTranslation,
           target_language: targetLanguage,
-          provider: "external",
+          provider: process.env.GOOGLE_TRANSLATE_API_KEY ? "google" : "external",
         })
       }
     } catch (err) {
       console.warn("Translation provider failed, using glossary fallback:", err.message)
     }
 
+    // Glossary-only fallback for supported languages; for others return original
+    const hasGlossary = SUPPORTED_TRANSLATION_LANGUAGES.has(targetLanguage)
     return res.json({
       ok: true,
-      translated_text: glossaryTranslate(text, targetLanguage),
+      translated_text: hasGlossary ? glossaryTranslate(text, targetLanguage) : text,
       target_language: targetLanguage,
-      provider: UNSUPPORTED_TRANSLATION_SCRIPT_RE.test(text) ? "glossary_cjk_fallback" : "glossary",
+      provider: hasGlossary
+        ? (UNSUPPORTED_TRANSLATION_SCRIPT_RE.test(text) ? "glossary_cjk_fallback" : "glossary")
+        : "passthrough",
     })
   } catch (err) {
     res.status(500).json({ ok: false, error: String(err.message || err) })
   }
+})
+
+// Language preference endpoints
+app.get('/api/settings/language', async (req, res) => {
+  try {
+    const db = mongoose.connection.db
+    if (!db) return res.json({ ok: true, language: 'en' })
+    const row = await db.collection('app_settings').findOne({ key: 'ui_language' })
+    res.json({ ok: true, language: row?.value || 'en' })
+  } catch (err) {
+    res.json({ ok: true, language: 'en' })
+  }
+})
+
+app.post('/api/settings/language', async (req, res) => {
+  try {
+    const lang = String(req.body.language || 'en').toLowerCase().slice(0, 5)
+    const db = mongoose.connection.db
+    if (db) {
+      await db.collection('app_settings').updateOne(
+        { key: 'ui_language' },
+        { $set: { key: 'ui_language', value: lang, updated_at: new Date() } },
+        { upsert: true }
+      )
+    }
+    res.json({ ok: true, language: lang })
+  } catch (err) {
+    res.status(500).json({ ok: false, error: String(err.message || err) })
+  }
+})
+
+// Translation status endpoint
+app.get('/api/translate/status', (req, res) => {
+  res.json({
+    ok: true,
+    google_translate_configured: !!process.env.GOOGLE_TRANSLATE_API_KEY,
+    supported_languages: Array.from(SUPPORTED_TRANSLATION_LANGUAGES),
+  })
 })
 
 app.use('/api/articles',    articlesRouter)
@@ -4000,13 +4059,57 @@ app.use('/api/correlation', correlationRouter)
 app.use('/api/settings',    settingsRouter)
 
 // ── Health check ──────────────────────────────────────────
-app.get('/api/health', (req, res) => {
+app.get('/api/health', async (req, res) => {
   const { readyState } = mongoose.connection
   const states = { 0:'disconnected', 1:'connected', 2:'connecting', 3:'disconnecting' }
-  res.json({
-    status:  'ok',
-    db:      states[readyState] || 'unknown',
-    time:    new Date().toISOString(),
+  const mongoStatus = states[readyState] || 'unknown'
+  const mongoOk = readyState === 1
+
+  // Redis check
+  let redisStatus = 'disconnected'
+  let redisOk = false
+  try {
+    if (redisReady()) {
+      await redis.ping()
+      redisStatus = 'connected'
+      redisOk = true
+    } else {
+      redisStatus = redis ? redis.status : 'disabled'
+    }
+  } catch { redisStatus = 'error' }
+
+  // Kafka check via metadata (best-effort, won't fail health)
+  let kafkaStatus = 'unknown'
+  try {
+    if (process.env.KAFKA_BOOTSTRAP_SERVERS) {
+      kafkaStatus = 'configured'
+    } else {
+      kafkaStatus = 'not_configured'
+    }
+  } catch { kafkaStatus = 'error' }
+
+  // Disk storage check
+  let diskOk = false
+  try {
+    const db = mongoose.connection.db
+    if (db) {
+      await db.collection('disk_archive').findOne({}, { projection: { _id: 1 } })
+      diskOk = true
+    }
+  } catch { diskOk = false }
+
+  const allOk = mongoOk && redisOk
+  res.status(allOk ? 200 : 503).json({
+    status: allOk ? 'ok' : 'degraded',
+    ok: allOk,
+    services: {
+      mongo: { status: mongoStatus, ok: mongoOk },
+      redis: { status: redisStatus, ok: redisOk },
+      kafka: { status: kafkaStatus, ok: kafkaStatus === 'configured' },
+      disk:  { status: diskOk ? 'accessible' : 'unavailable', ok: diskOk },
+    },
+    time: new Date().toISOString(),
+    uptime: process.uptime(),
   })
 })
 
@@ -5523,7 +5626,72 @@ app.get('/api/reddit/posts/:ticker', async (req, res) => {
   }
 })
 
+// ── Session beacon: browser calls this on pagehide to trigger auto-save ──────
+app.post('/api/session/save', async (req, res) => {
+  // Accepts text/plain body from navigator.sendBeacon
+  res.set('Content-Type', 'text/plain')
+  try {
+    const db = mongoose.connection.db
+    if (!db) return res.end('no-db')
+    const ttlDays = await getDiskTtlDays()
+    await ensureDiskTtlIndex(db, ttlDays)
+    const now = new Date()
+    const expiresAt = new Date(now.getTime() + ttlDays * 86400 * 1000)
+    const sinceSec = Math.floor(now.getTime() / 1000) - 2 * 86400
+    const [articleCount, socialCount, tickerAgg, sentimentAgg] = await Promise.all([
+      db.collection('articles').countDocuments(),
+      db.collection('socials').countDocuments(),
+      db.collection('articles').aggregate([
+        { $match: { ticker: { $exists: true, $ne: '' }, detected_at: { $gte: sinceSec } } },
+        { $group: { _id: '$ticker', count: { $sum: 1 } } },
+        { $sort: { count: -1 } }, { $limit: 10 }
+      ]).toArray(),
+      db.collection('articles').aggregate([
+        { $match: { sentiment: { $in: ['bullish', 'bearish', 'neutral'] } } },
+        { $group: { _id: '$sentiment', count: { $sum: 1 } } }
+      ]).toArray(),
+    ])
+    const sentimentMap = Object.fromEntries(sentimentAgg.map(r => [r._id, r.count]))
+    await db.collection(DISK_ARCHIVE_COLLECTION).insertOne({
+      saved_at: now, expires_at: expiresAt, ttl_days: ttlDays,
+      articles_count: articleCount, social_count: socialCount,
+      top_tickers: tickerAgg.map(r => r._id),
+      sentiment: { bullish: sentimentMap.bullish ?? 0, bearish: sentimentMap.bearish ?? 0, neutral: sentimentMap.neutral ?? 0 },
+      trigger: 'session_end',
+    })
+    console.log('  Session auto-save →', articleCount, 'articles,', socialCount, 'social, TTL', ttlDays, 'days')
+    res.end('saved')
+  } catch (err) {
+    console.warn('Session auto-save failed:', err.message)
+    res.end('error')
+  }
+})
+
 // ─────────────────────────────────────────────────────────────────────────────
+
+async function autoSaveOnShutdown() {
+  try {
+    const db = mongoose.connection.db
+    if (!db) return
+    const ttlDays = await getDiskTtlDays()
+    await ensureDiskTtlIndex(db, ttlDays)
+    const now = new Date()
+    const expiresAt = new Date(now.getTime() + ttlDays * 86400 * 1000)
+    const [articleCount, socialCount] = await Promise.all([
+      db.collection('articles').countDocuments(),
+      db.collection('socials').countDocuments(),
+    ])
+    await db.collection(DISK_ARCHIVE_COLLECTION).insertOne({
+      saved_at: now, expires_at: expiresAt, ttl_days: ttlDays,
+      articles_count: articleCount, social_count: socialCount,
+      top_tickers: [], sentiment: {},
+      trigger: 'server_shutdown',
+    })
+    console.log('  Shutdown auto-save →', articleCount, 'articles,', socialCount, 'social')
+  } catch (err) {
+    console.warn('Shutdown auto-save failed:', err.message)
+  }
+}
 
 app.listen(PORT, () => {
     console.log()
@@ -5534,6 +5702,15 @@ app.listen(PORT, () => {
     console.log('  Docs    →  README-MONGODB.md')
     console.log()
   })
+
+  // Auto-save snapshot when the server process exits
+  const shutdown = async (signal) => {
+    console.log('  FlashFeed shutting down (' + signal + ')…')
+    await autoSaveOnShutdown()
+    process.exit(0)
+  }
+  process.once('SIGTERM', () => shutdown('SIGTERM'))
+  process.once('SIGINT',  () => shutdown('SIGINT'))
 }
 
 start()

@@ -298,8 +298,8 @@ export function OverviewPage() {
   )
 }
 
-function OverviewArticleRow({ article, targetLanguage }: { article: Article; targetLanguage: string }) {
-  const { translated, source } = useTranslatedText(article.title, targetLanguage)
+function OverviewArticleRow({ article, targetLanguage: _targetLanguage }: { article: Article; targetLanguage: string }) {
+  const { translated, source } = useTranslatedText(article.title)
 
   return (
     <a href={article.url || '#'} target="_blank" rel="noreferrer" className="block px-3 py-2 hover:bg-bg/40">

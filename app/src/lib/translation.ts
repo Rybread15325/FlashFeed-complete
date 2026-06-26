@@ -1,14 +1,15 @@
 import { useMemo, useState, useEffect } from 'react'
+import { useLanguage, LANGUAGES } from './language'
 
 export const DEFAULT_TRANSLATION_LANGUAGE = 'en'
 
 export function getLanguageLabel(language: string) {
-  if (language === 'en') return 'English'
-  return language.toUpperCase()
+  return LANGUAGES.find(l => l.code === language)?.label || language
 }
 
 export function useTargetLanguage() {
-  return DEFAULT_TRANSLATION_LANGUAGE
+  const { language } = useLanguage()
+  return language || DEFAULT_TRANSLATION_LANGUAGE
 }
 
 export function canTranslateText(text: string | undefined | null) {
@@ -16,7 +17,8 @@ export function canTranslateText(text: string | undefined | null) {
   return Boolean(cleaned)
 }
 
-export function useTranslatedText(text: string | undefined | null, targetLanguage: string) {
+export function useTranslatedText(text: string | undefined | null) {
+  const targetLanguage = useTargetLanguage()
   const [translated, setTranslated] = useState('')
   const [source, setSource] = useState('')
   const cleanedText = useMemo(() => String(text || '').trim(), [text])
@@ -24,9 +26,9 @@ export function useTranslatedText(text: string | undefined | null, targetLanguag
   useEffect(() => {
     let cancelled = false
 
-    if (!canTranslateText(cleanedText)) {
-      setTranslated('')
-      setSource('')
+    if (!canTranslateText(cleanedText) || targetLanguage === 'en') {
+      setTranslated(cleanedText)
+      setSource('passthrough')
       return
     }
 
@@ -39,22 +41,20 @@ export function useTranslatedText(text: string | undefined | null, targetLanguag
         })
         const data = await res.json()
         if (!cancelled) {
-          setTranslated(data.translated_text || '')
+          setTranslated(data.translated_text || cleanedText)
           setSource(data.provider || '')
         }
       } catch {
         if (!cancelled) {
-          setTranslated('')
+          setTranslated(cleanedText)
           setSource('')
         }
       }
     }
 
     run()
-    return () => {
-      cancelled = true
-    }
+    return () => { cancelled = true }
   }, [cleanedText, targetLanguage])
 
-  return { translated, source }
+  return { translated: translated || cleanedText, source }
 }

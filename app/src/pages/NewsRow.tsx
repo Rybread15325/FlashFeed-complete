@@ -38,7 +38,7 @@ function highlightKeywords(text: string, keywords: string[]): React.ReactNode {
 export function NewsRow({ article: a, keywords }: Props) {
   const [price, setPrice] = useState<{ price: number; change: number } | null>(null)
   const targetLanguage = useTargetLanguage()
-  const { translated, source } = useTranslatedText(a.title, targetLanguage)
+  const { translated, source } = useTranslatedText(a.title)
 
   useEffect(() => {
     if (!a.ticker) return
