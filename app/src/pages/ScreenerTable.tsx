@@ -73,11 +73,16 @@ const COLUMNS: Record<ViewMode, Array<{ key: string; label: string; sortable?: b
 }
 
 export function ScreenerTable({ rows, isLoading, viewMode, pageOffset = 0, onSort, sortKey, sortDir, pinnedTickers, onPin }: Props) {
-  const [expandedTicker, setExpandedTicker] = useState<string | null>(null)
+  const [expandedTickers, setExpandedTickers] = useState<Set<string>>(new Set())
   const columns = COLUMNS[viewMode]
 
   const handleExpand = (ticker: string) => {
-    setExpandedTicker(t => t === ticker ? null : ticker)
+    setExpandedTickers(prev => {
+      const next = new Set(prev)
+      if (next.has(ticker)) next.delete(ticker)
+      else next.add(ticker)
+      return next
+    })
   }
 
   if (isLoading) {
@@ -125,7 +130,7 @@ export function ScreenerTable({ rows, isLoading, viewMode, pageOffset = 0, onSor
                 columns={columns}
                 rowIndex={pageOffset + i + 1}
                 colSpan={columns.length}
-                expanded={expandedTicker === row.ticker}
+                expanded={expandedTickers.has(row.ticker)}
                 onExpand={() => handleExpand(row.ticker)}
                 pinned={pinnedTickers?.includes(row.ticker)}
                 onPin={onPin}

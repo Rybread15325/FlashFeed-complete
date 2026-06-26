@@ -220,6 +220,52 @@ function socialTimeStages() {
   ]
 }
 
+async function loadLatestHeadlinesForTickers(db, tickers) {
+  const wanted = Array.from(new Set(tickers.map(t => String(t || '').toUpperCase()).filter(Boolean)))
+  if (!wanted.length) return new Map()
+
+  const rows = await db.collection('articles').aggregate([
+    {
+      $match: {
+        ticker: { $exists: true, $nin: ['', null] },
+        title: { $exists: true, $ne: '' },
+      },
+    },
+    {
+      $addFields: {
+        _ticker_parts: {
+          $map: {
+            input: { $split: [{ $toUpper: { $toString: '$ticker' } }, ','] },
+            as: 'p',
+            in: { $trim: { input: '$$p' } },
+          },
+        },
+      },
+    },
+    { $unwind: '$_ticker_parts' },
+    { $match: { _ticker_parts: { $in: wanted } } },
+    { $sort: { publish_date: -1 } },
+    {
+      $group: {
+        _id: '$_ticker_parts',
+        title: { $first: '$title' },
+        url: { $first: '$url' },
+        source: { $first: '$source' },
+        publish_date: { $first: '$publish_date' },
+        sentiment: { $first: '$sentiment' },
+      },
+    },
+  ]).toArray()
+
+  return new Map(rows.map(r => [String(r._id || '').toUpperCase(), {
+    title: r.title,
+    url: r.url || null,
+    source: r.source || null,
+    publish_date: r.publish_date || null,
+    sentiment: r.sentiment || null,
+  }]))
+}
+
 async function loadArticleStatsForTickers(db, tickers, days = 2) {
   const wanted = Array.from(new Set(tickers.map(t => String(t || '').toUpperCase()).filter(Boolean)))
   if (!wanted.length) return new Map()
@@ -497,7 +543,7 @@ async function loadAdaptiveSocialStatsForRows(db, rows, windowOverride = null) {
   return new Map(results.map(row => [String(row._id || '').toUpperCase(), row]))
 }
 
-function enrichScreenerRow(row, articleRow, socialRow, windowOverride = null) {
+function enrichScreenerRow(row, articleRow, socialRow, headlineRow, windowOverride = null) {
   const newsScore = articleRow ? sentimentScore(articleRow) : Number(row.structured_sentiment || 0)
   const socialCount = Number(socialRow?.count || 0)
   const socialScore = socialCount ? Number(Number(socialRow.sentiment || 0).toFixed(3)) : Number(row.social_sentiment || 0)
@@ -531,6 +577,13 @@ function enrichScreenerRow(row, articleRow, socialRow, windowOverride = null) {
     sources: [...(articleRow?.sources || []), ...(socialRow?.platforms || []), row.quote_source].filter(Boolean).slice(0, 8),
     latest_publish: articleRow?.latest_publish || null,
     latest_social: socialRow?.latest_post || null,
+    latest_headline: headlineRow ? {
+      title: headlineRow.title,
+      url: headlineRow.url,
+      source: headlineRow.source,
+      publish_date: headlineRow.publish_date,
+      sentiment: headlineRow.sentiment,
+    } : null,
   }
 }
 
@@ -557,11 +610,19 @@ router.get('/', async (req, res) => {
 
     if (mongoose.connection.db && data.length) {
       const tickers = data.map(row => row.ticker)
-      const [articleMap, socialMap] = await Promise.all([
+      const [articleMap, socialMap, headlineMap] = await Promise.all([
         loadArticleStatsForTickers(mongoose.connection.db, tickers, Number(days || 2)),
         loadAdaptiveSocialStatsForRows(mongoose.connection.db, data, windowOverride),
+        loadLatestHeadlinesForTickers(mongoose.connection.db, tickers),
       ])
-      data = data.map(row => enrichScreenerRow(row, articleMap.get(row.ticker), socialMap.get(row.ticker), windowOverride))
+      data = data.map(row => enrichScreenerRow(row, articleMap.get(row.ticker), socialMap.get(row.ticker), headlineMap.get(row.ticker), windowOverride))
+      // Sort: rows with fresh articles first, then by article count, then ticker
+      data.sort((a, b) => {
+        const ap = a.latest_publish ?? 0
+        const bp = b.latest_publish ?? 0
+        if (bp !== ap) return bp - ap
+        return (b.news_article_count ?? 0) - (a.news_article_count ?? 0)
+      })
     }
 
     const activeSocialRows = data.filter(row => Number(row.message_count || 0) > 0)

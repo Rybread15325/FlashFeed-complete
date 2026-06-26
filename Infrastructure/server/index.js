@@ -31,6 +31,20 @@ const NON_STOCK_TICKERS = new Set([
   "MATIC", "SHIB", "TRX", "BCH", "LINK", "ATOM", "UNI", "ETC", "FIL",
   "USD", "USDT", "USDC", "SPOT",
 ])
+
+// ── Catalyst keyword detection (ported from V2) ───────────────────────────────
+const CATALYST_KEYWORDS = [
+  'contract', 'fda', 'earnings', 'merger', 'acquisition',
+  'data center', 'offering', 'split', 'partnership', 'guidance',
+  'short squeeze', 'ipo', 'listing', 'dividend', 'buyout',
+  'upgrade', 'downgrade', 'price target', 'clinical trial',
+  'sec filing', 'bankruptcy', 'layoffs', 'recall', 'restructuring',
+]
+function detectCatalysts(title) {
+  const lower = (title || '').toLowerCase()
+  return CATALYST_KEYWORDS.filter(kw => lower.includes(kw))
+}
+// ─────────────────────────────────────────────────────────────────────────────
 const US_EXCHANGES = new Set(["NASDAQ", "NYSE", "AMEX"])
 const TRACKED_MARKET_INDICES = [
   { symbol: "DJI", name: "Dow Jones Industrial Average", category: "index" },
@@ -93,7 +107,8 @@ const redisReady = () => !!redis && redis.status === 'ready'
 // from RAM within the TTL window. Only successful (200) responses are cached.
 const CACHE_RULES = [
   { match: (p) => p === '/api/screener',        ttl: Number(process.env.CACHE_TTL_SCREENER || 20) },
-  { match: (p) => p === '/api/social/rolling',  ttl: Number(process.env.CACHE_TTL_SOCIAL || 15) },
+  { match: (p) => p === '/api/social/rolling',          ttl: Number(process.env.CACHE_TTL_SOCIAL || 15) },
+  { match: (p) => p === '/api/social/rolling/windows', ttl: Number(process.env.CACHE_TTL_SOCIAL || 15) },
   { match: (p) => p.startsWith('/api/charts/'), ttl: Number(process.env.CACHE_TTL_CHARTS || 20) },
   { match: (p) => p === '/api/momentum',        ttl: Number(process.env.CACHE_TTL_MOMENTUM || 15) },
   { match: (p) => p === '/api/correlation',     ttl: Number(process.env.CACHE_TTL_CORRELATION || 30) },
@@ -2251,7 +2266,7 @@ app.get("/api/momentum/:ticker/details", async (req, res) => {
       source: article.source || "News",
       sentiment: article.sentiment || "neutral",
       time: timeLabel(article.publish_date || article.fetched_date),
-      catalyst: article.category || undefined,
+      catalyst: detectCatalysts(article.title).join(', ') || article.category || undefined,
       url: article.url,
     }))
 
@@ -4091,8 +4106,163 @@ app.get("/api/social/rolling/stats", async (req, res) => {
     return res.status(500).json({ ok: false, error: String(err?.message || err), counts: {} })
   }
 })
+// ── Rolling windows: 7 window sizes per ticker (ported from V2 rolling_windows.py) ──
+// GET /api/social/rolling/windows?ticker=AAPL
+// Returns avg_sentiment, message_count, bullish/bearish/neutral at 1/3/5/10/15/30/60 min windows.
+const ROLLING_WINDOW_SIZES = [1, 3, 5, 10, 15, 30, 60]
+
+app.get("/api/social/rolling/windows", async (req, res) => {
+  try {
+    const db = mongoose.connection.db
+    if (!db) return res.status(503).json({ ok: false, error: "MongoDB not connected" })
+
+    const ticker = normalizeTickerList([req.query.ticker || req.query.symbol], 1, { ensurePrivate: false })[0] || ""
+    if (!ticker) return res.status(400).json({ ok: false, error: "ticker required" })
+
+    const now = Math.floor(Date.now() / 1000)
+    const maxWindowSec = Math.max(...ROLLING_WINDOW_SIZES) * 60
+
+    // Single aggregation: fetch all posts within the largest window, then slice per sub-window in JS
+    const pipeline = [
+      ...socialTimeStages(),
+      { $match: { _event_sec: { $gte: now - maxWindowSec }, _ticker_candidates: ticker } },
+      { $project: { _id: 0, _event_sec: 1, sentiment_score: 1, sentiment: 1 } },
+    ]
+
+    const posts = await db.collection("socials").aggregate(pipeline).toArray()
+
+    const windows = ROLLING_WINDOW_SIZES.map(w => {
+      const cutoff = now - w * 60
+      const inWindow = posts.filter(p => Number(p._event_sec) >= cutoff)
+      const scores = inWindow.map(p => {
+        const raw = p.sentiment_score ?? p.sentiment
+        if (typeof raw === 'number' && Number.isFinite(raw)) return raw
+        const s = String(raw || '').toLowerCase()
+        if (s.includes('bull') || s.includes('positive')) return 0.5
+        if (s.includes('bear') || s.includes('negative')) return -0.5
+        return 0
+      })
+      const count = inWindow.length
+      const bullish = scores.filter(s => s > 0.2).length
+      const bearish = scores.filter(s => s < -0.2).length
+      const neutral = count - bullish - bearish
+      const avg_sentiment = scores.length
+        ? +(scores.reduce((a, b) => a + b, 0) / scores.length).toFixed(4)
+        : 0
+      return { window_minutes: w, message_count: count, avg_sentiment, bullish_count: bullish, bearish_count: bearish, neutral_count: neutral }
+    })
+
+    return res.json({ ok: true, ticker, windows, computed_at: Date.now() })
+  } catch (err) {
+    console.error("GET /api/social/rolling/windows failed:", err)
+    return res.status(500).json({ ok: false, error: String(err?.message || err) })
+  }
+})
 // SOCIAL_ROLLING_API_V2_END
 
+// ── Ticker enrichment panel: aggregates news + social for TickerEnrichPanels ──
+// GET /api/ticker/:ticker/enrich
+app.get("/api/ticker/:ticker/enrich", async (req, res) => {
+  try {
+    const db = mongoose.connection.db
+    if (!db) return res.status(503).json({ ok: false, error: "MongoDB not connected" })
+    const ticker = (req.params.ticker || '').toUpperCase().trim()
+    if (!ticker) return res.status(400).json({ ok: false, error: "ticker required" })
+
+    const now = Math.floor(Date.now() / 1000)
+    const windowSec = 48 * 3600
+
+    // Latest articles
+    const articles = await db.collection("articles")
+      .find({ tickers: ticker, publish_date: { $gte: now - windowSec } })
+      .sort({ publish_date: -1 })
+      .limit(20)
+      .project({ title: 1, source: 1, publish_date: 1, url: 1, sentiment: 1, ai_sentiment_label: 1, ai_sentiment_score: 1, ml_confidence: 1, catalyst: 1 })
+      .toArray()
+
+    // AI catalyst summary: find most recent article with a catalyst
+    const catalystArticles = articles.filter(a => a.catalyst)
+    const aiSummary = catalystArticles.length > 0
+      ? `${catalystArticles.length} catalyst(s) detected: ${[...new Set(catalystArticles.map(a => a.catalyst))].join(', ')}`
+      : null
+
+    // Social breakdown by source
+    const socialPipeline = [
+      ...socialTimeStages(),
+      {
+        $match: {
+          _event_sec: { $gte: now - 24 * 3600 },
+          _ticker_candidates: ticker,
+        },
+      },
+      {
+        $group: {
+          _id: "$source",
+          count: { $sum: 1 },
+          sentSum: { $sum: { $ifNull: ["$sentiment_score", 0] } },
+          bullish: { $sum: { $cond: [{ $gt: [{ $ifNull: ["$sentiment_score", 0] }, 0.2] }, 1, 0] } },
+          bearish: { $sum: { $cond: [{ $lt: [{ $ifNull: ["$sentiment_score", 0] }, -0.2] }, 1, 0] } },
+        },
+      },
+    ]
+
+    const socialGroups = await db.collection("socials").aggregate(socialPipeline).toArray()
+
+    function buildPlatform(src) {
+      const g = socialGroups.find(s => (s._id || '').toLowerCase().includes(src))
+      if (!g) return undefined
+      return {
+        sentiment: g.count > 0 ? +(g.sentSum / g.count).toFixed(4) : 0,
+        message_count: g.count,
+        bullish_count: g.bullish,
+        bearish_count: g.bearish,
+      }
+    }
+
+    // Rumor detection: look for rumor keywords in recent posts/articles
+    const RUMOR_KW = ['rumor', 'unconfirmed', 'allegedly', 'report says', 'sources say', 'leaked', 'speculation']
+    const recentTitles = articles.map(a => (a.title || '').toLowerCase())
+    const foundRumors = RUMOR_KW.filter(kw => recentTitles.some(t => t.includes(kw)))
+
+    const newsAlertCount = articles.filter(a =>
+      a.ai_sentiment_label === 'bullish' || a.ai_sentiment_label === 'bearish'
+    ).length
+
+    return res.json({
+      ok: true,
+      data: {
+        ticker,
+        news_alert: newsAlertCount > 2 ? `High news activity: ${newsAlertCount} sentiment articles` : undefined,
+        news_alert_count: newsAlertCount > 2 ? newsAlertCount : undefined,
+        news: {
+          articles: articles.map(a => ({
+            title: a.title,
+            source: a.source,
+            publish_date: a.publish_date,
+            url: a.url,
+            sentiment: a.sentiment,
+            ai_sentiment_label: a.ai_sentiment_label,
+            ai_sentiment_score: a.ai_sentiment_score,
+            ml_confidence: a.ml_confidence,
+            catalyst: a.catalyst,
+          })),
+          ai: aiSummary,
+          sources: [...new Set(articles.map(a => a.source))].slice(0, 5),
+        },
+        social: {
+          stocktwits: buildPlatform('stocktwits'),
+          bluesky: buildPlatform('bluesky'),
+          reddit: buildPlatform('reddit'),
+          rumor: foundRumors.length > 0,
+          rumor_keywords: foundRumors,
+        },
+      },
+    })
+  } catch (err) {
+    console.error("GET /api/ticker/:ticker/enrich failed:", err)
+    return res.status(500).json({ ok: false, error: String(err?.message || err) })
+  }
+})
 
 app.use('/api/social',      socialRouter)
 app.use('/api/correlation', correlationRouter)

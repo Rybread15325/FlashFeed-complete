@@ -3,10 +3,13 @@ import { useState } from 'react'
 import useSWR from 'swr'
 import type { Article, ScreenerRow as SR } from '@/lib/types'
 import { CandlestickChart } from './CandlestickChart'
+import { RollingWindowsTable } from './RollingWindowsTable'
+import { TickerEnrichPanels } from './TickerEnrichPanels'
+import { useTranslatedText } from '@/lib/translation'
 
 const fetcher = (url: string) => fetch(url).then(r => r.json())
 
-type MirrorTab = 'overview' | 'technicals' | 'financials' | 'correlation' | 'news'
+type MirrorTab = 'overview' | 'technicals' | 'financials' | 'correlation' | 'news' | 'enrich'
 type NewsSubTab = 'news' | 'reddit' | 'twitter'
 
 interface Props {
@@ -129,6 +132,40 @@ function CorrelationGauge({ label, value, description }: { label: string; value:
   )
 }
 
+function ArticleItem({ article, index }: { article: Article; index: number }) {
+  const { translated } = useTranslatedText(article.title)
+  const a = article as any
+  return (
+    <a
+      key={article.id || article.article_id || article.url || index}
+      href={article.url || '#'}
+      target="_blank"
+      rel="noreferrer"
+      className="flex items-start gap-2 group"
+    >
+      <span className={`shrink-0 mt-0.5 text-[9px] font-semibold uppercase px-1.5 py-0.5 rounded ${
+        a.fromWeb ? 'bg-amber-500/15 text-amber-400'
+        : article.sentiment === 'bullish' ? 'bg-emerald-500/15 text-emerald-400'
+        : article.sentiment === 'bearish' ? 'bg-red-500/15 text-red-400'
+        : 'bg-slate-600/20 text-slate-400'
+      }`}>
+        {a.fromWeb ? 'WEB' : (article.sentiment ?? 'N')}
+      </span>
+      <div className="min-w-0">
+        <div className="text-xs text-slate-200 group-hover:text-white leading-snug line-clamp-2">{translated}</div>
+        <div className="text-[10px] text-neutral mt-0.5">
+          {article.source}
+          {article.publish_date
+            ? ` · ${new Date(article.publish_date * 1000).toLocaleDateString()}`
+            : a.publishedAt
+              ? ` · ${new Date(a.publishedAt).toLocaleDateString()}`
+              : ''}
+        </div>
+      </div>
+    </a>
+  )
+}
+
 function TickerMirrorContent({ ticker, row, onClose }: { ticker: string; row: SR; onClose: () => void }) {
   const [activeSection, setActiveSection] = useState<MirrorTab>('overview')
   const [newsSubTab, setNewsSubTab] = useState<NewsSubTab>('news')
@@ -198,6 +235,7 @@ function TickerMirrorContent({ ticker, row, onClose }: { ticker: string; row: SR
     { key: 'financials',   label: 'Financials' },
     { key: 'correlation',  label: 'Correlation' },
     { key: 'news',         label: `News${newsCount > 0 ? ` (${newsCount})` : ''}` },
+    { key: 'enrich',       label: 'Enrich' },
   ]
 
   const runGrok = async () => {
@@ -430,6 +468,9 @@ function TickerMirrorContent({ ticker, row, onClose }: { ticker: string; row: SR
                 <span className="font-mono text-white">{v}</span>
               </div>
             ))}
+            <div className="mt-4">
+              <RollingWindowsTable ticker={ticker} />
+            </div>
           </div>
         </div>
       )}
@@ -465,33 +506,7 @@ function TickerMirrorContent({ ticker, row, onClose }: { ticker: string; row: SR
                     )}
                     <div className="flex flex-col gap-2">
                       {news.map((a, i) => (
-                        <a
-                          key={a.id || a.article_id || a.url || i}
-                          href={a.url || '#'}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="flex items-start gap-2 group"
-                        >
-                          <span className={`shrink-0 mt-0.5 text-[9px] font-semibold uppercase px-1.5 py-0.5 rounded ${
-                            (a as any).fromWeb ? 'bg-amber-500/15 text-amber-400'
-                            : a.sentiment === 'bullish' ? 'bg-emerald-500/15 text-emerald-400'
-                            : a.sentiment === 'bearish' ? 'bg-red-500/15 text-red-400'
-                            : 'bg-slate-600/20 text-slate-400'
-                          }`}>
-                            {(a as any).fromWeb ? 'WEB' : (a.sentiment ?? 'N')}
-                          </span>
-                          <div className="min-w-0">
-                            <div className="text-xs text-slate-200 group-hover:text-white leading-snug line-clamp-2">{a.title}</div>
-                            <div className="text-[10px] text-neutral mt-0.5">
-                              {a.source}
-                              {a.publish_date
-                                ? ` · ${new Date(a.publish_date * 1000).toLocaleDateString()}`
-                                : (a as any).publishedAt
-                                  ? ` · ${new Date((a as any).publishedAt).toLocaleDateString()}`
-                                  : ''}
-                            </div>
-                          </div>
-                        </a>
+                        <ArticleItem key={a.id || a.article_id || a.url || i} article={a} index={i} />
                       ))}
                     </div>
                   </>
@@ -568,6 +583,13 @@ function TickerMirrorContent({ ticker, row, onClose }: { ticker: string; row: SR
                     )
             )}
           </div>
+        </div>
+      )}
+
+      {/* Enrich */}
+      {activeSection === 'enrich' && (
+        <div className="px-4 pb-4">
+          <TickerEnrichPanels ticker={ticker} />
         </div>
       )}
     </div>

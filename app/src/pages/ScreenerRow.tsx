@@ -59,18 +59,37 @@ export function ScreenerRow({ row, columns, rowIndex, colSpan, expanded, onExpan
       case 'no':
         return <span className="text-slate-500 font-mono text-[11px]">{rowIndex}</span>
 
-      case 'ticker':
+      case 'ticker': {
+        const hl = row.latest_headline
+        const sentCls = hl?.sentiment?.toLowerCase().includes('bull') ? 'text-emerald-400'
+          : hl?.sentiment?.toLowerCase().includes('bear') ? 'text-red-400'
+          : 'text-slate-500'
         return (
-          <button
-            onClick={onExpand}
-            className={clsx(
-              'font-mono font-bold transition-colors',
-              expanded ? 'text-sky-300' : 'text-accent hover:text-sky-300'
+          <div className="flex flex-col gap-0.5 min-w-0">
+            <button
+              onClick={onExpand}
+              className={clsx(
+                'font-mono font-bold transition-colors text-left',
+                expanded ? 'text-sky-300' : 'text-accent hover:text-sky-300'
+              )}
+            >
+              {row.ticker}
+            </button>
+            {hl?.title && (
+              <a
+                href={hl.url || undefined}
+                target="_blank"
+                rel="noreferrer"
+                onClick={e => e.stopPropagation()}
+                title={hl.title}
+                className={clsx('text-[9px] leading-tight truncate max-w-[180px] hover:text-white transition-colors', sentCls)}
+              >
+                {hl.title}
+              </a>
             )}
-          >
-            {row.ticker}
-          </button>
+          </div>
         )
+      }
 
       case 'company':
         return <span className="text-slate-300 truncate block max-w-[160px]">{row.company || row.industry || '—'}</span>

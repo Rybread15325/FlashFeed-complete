@@ -82,6 +82,13 @@ export interface ScreenerRow {
   rolling_window_minutes?: number
   latest_publish?:      number | string | null
   latest_social?:       number | string | null
+  latest_headline?: {
+    title: string
+    url?: string | null
+    source?: string | null
+    publish_date?: number | null
+    sentiment?: string | null
+  } | null
 }
 
 export interface MomentumRow {

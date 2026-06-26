@@ -5,6 +5,7 @@ import { clsx } from 'clsx'
 import { StatusBadge } from './StatusBadge'
 import { useToast } from '@/components/shared/Toast'
 import { SentimentModal } from '@/components/shared/SentimentModal'
+import { useLanguage, LANGUAGES } from '@/lib/language'
 
 const fetcher = (url: string) => fetch(url).then(r => r.json())
 
@@ -18,6 +19,7 @@ const NAV = [
   { href: '/screener', label: 'Screener' },
   { href: '/social', label: 'Social' },
   { href: '/charts', label: 'Charts' },
+  { href: '/charts-grid', label: 'Charts Grid' },
   { href: '/momentum', label: 'Momentum' },
   { href: '/correlation', label: 'Correlation' },
   { href: '/settings', label: 'Settings' },
@@ -27,6 +29,7 @@ export function TopBar() {
   const { pathname } = useLocation()
   const { toast } = useToast()
   const { mutate } = useSWRConfig()
+  const { language, setLanguage } = useLanguage()
   const { data: status, mutate: mutateStatus } = useSWR('/api/status', fetcher, { refreshInterval: 30_000 })
   const { data: stats } = useSWR('/api/stats?days=0', fetcher, { refreshInterval: 30_000 })
   const { data: marketStatus } = useSWR('/api/market/status', fetcher, { refreshInterval: 60_000 })
@@ -235,6 +238,18 @@ export function TopBar() {
           >
             {fetching ? 'Fetching...' : cooldownRemaining > 0 ? `Fetch ${cooldownRemaining}s` : 'Run Now'}
           </button>
+
+          {/* Language selector */}
+          <select
+            value={language}
+            onChange={e => setLanguage(e.target.value)}
+            className="hidden md:block bg-bg border border-border text-xs text-neutral rounded px-2 py-1.5 focus:outline-none focus:border-accent"
+            title="UI language for article translation"
+          >
+            {LANGUAGES.map(l => (
+              <option key={l.code} value={l.code}>{l.flag} {l.nativeLabel}</option>
+            ))}
+          </select>
 
           <button
             onClick={saveToDisk}
