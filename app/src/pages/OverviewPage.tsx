@@ -3,6 +3,7 @@ import { useMemo } from 'react'
 import { clsx } from 'clsx'
 import type { Article, CorrelationEntry } from '@/lib/types'
 import { getLanguageLabel, useTargetLanguage, useTranslatedText } from '@/lib/translation'
+import { useLanguage } from '@/lib/language'
 
 type SocialPreview = {
   platform?: string
@@ -298,8 +299,9 @@ export function OverviewPage() {
   )
 }
 
-function OverviewArticleRow({ article, targetLanguage: _targetLanguage }: { article: Article; targetLanguage: string }) {
+function OverviewArticleRow({ article }: { article: Article; targetLanguage?: string }) {
   const { translated, source } = useTranslatedText(article.title)
+  const { language } = useLanguage()
 
   return (
     <a href={article.url || '#'} target="_blank" rel="noreferrer" className="block px-3 py-2 hover:bg-bg/40">
@@ -312,7 +314,7 @@ function OverviewArticleRow({ article, targetLanguage: _targetLanguage }: { arti
       <div className="text-sm text-slate-200 line-clamp-2">{article.title}</div>
       {translated && translated !== article.title && (
         <div className="text-[11px] text-sky-300 line-clamp-2 mt-1">
-          {getLanguageLabel(targetLanguage)}: {translated}
+          {getLanguageLabel(language)}: {translated}
           {source === 'glossary' && <span className="text-neutral"> · glossary</span>}
         </div>
       )}

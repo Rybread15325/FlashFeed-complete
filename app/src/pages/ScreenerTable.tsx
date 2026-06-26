@@ -12,6 +12,8 @@ interface Props {
   onSort?: (key: string) => void
   sortKey?: string
   sortDir?: 'asc' | 'desc'
+  pinnedTickers?: string[]
+  onPin?: (row: SR) => void
 }
 
 const COLUMNS: Record<ViewMode, Array<{ key: string; label: string; sortable?: boolean }>> = {
@@ -70,7 +72,7 @@ const COLUMNS: Record<ViewMode, Array<{ key: string; label: string; sortable?: b
   ],
 }
 
-export function ScreenerTable({ rows, isLoading, viewMode, pageOffset = 0, onSort, sortKey, sortDir }: Props) {
+export function ScreenerTable({ rows, isLoading, viewMode, pageOffset = 0, onSort, sortKey, sortDir, pinnedTickers, onPin }: Props) {
   const [expandedTicker, setExpandedTicker] = useState<string | null>(null)
   const columns = COLUMNS[viewMode]
 
@@ -112,6 +114,7 @@ export function ScreenerTable({ rows, isLoading, viewMode, pageOffset = 0, onSor
                   )}
                 </th>
               ))}
+              {onPin && <th className="w-6 px-1" />}
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-700/20">
@@ -124,6 +127,8 @@ export function ScreenerTable({ rows, isLoading, viewMode, pageOffset = 0, onSor
                 colSpan={columns.length}
                 expanded={expandedTicker === row.ticker}
                 onExpand={() => handleExpand(row.ticker)}
+                pinned={pinnedTickers?.includes(row.ticker)}
+                onPin={onPin}
               />
             ))}
           </tbody>

@@ -10,6 +10,8 @@ interface Props {
   colSpan: number
   expanded: boolean
   onExpand: () => void
+  pinned?: boolean
+  onPin?: (row: SR) => void
 }
 
 function fmtCompact(n: number | undefined | null): string {
@@ -51,7 +53,7 @@ function sentBar(bullish: number, bearish: number, neutral: number) {
   )
 }
 
-export function ScreenerRow({ row, columns, rowIndex, colSpan, expanded, onExpand }: Props) {
+export function ScreenerRow({ row, columns, rowIndex, colSpan, expanded, onExpand, pinned, onPin }: Props) {
   const renderCell = (key: string) => {
     switch (key) {
       case 'no':
@@ -259,6 +261,19 @@ export function ScreenerRow({ row, columns, rowIndex, colSpan, expanded, onExpan
         {columns.map(col => (
           <td key={col.key} className="px-2 py-1.5 whitespace-nowrap">{renderCell(col.key)}</td>
         ))}
+        {onPin && (
+          <td className="px-1 py-1.5 w-6">
+            <button
+              onClick={e => { e.stopPropagation(); onPin(row) }}
+              title={pinned ? 'Unpin ticker' : 'Pin to bottom panel'}
+              className={`w-5 h-5 flex items-center justify-center rounded transition-colors text-[11px] ${
+                pinned ? 'text-amber-400 bg-amber-500/15 hover:bg-amber-500/25' : 'text-slate-600 hover:text-amber-400 hover:bg-amber-500/10'
+              }`}
+            >
+              📌
+            </button>
+          </td>
+        )}
       </tr>
       {expanded && (
         <TickerMirror

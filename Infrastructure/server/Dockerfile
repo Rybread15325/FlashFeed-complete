@@ -27,4 +27,4 @@ ENV RSS_STATE_FILE=/tmp/feedflash_rss_fetch_state.json
 
 EXPOSE 3001
 
-CMD ["npm", "run", "dev"]
+CMD ["node", "index.js"]

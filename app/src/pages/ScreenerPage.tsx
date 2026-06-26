@@ -4,6 +4,7 @@ import { useState, useMemo } from 'react'
 import { ScreenerTable } from './ScreenerTable'
 import { ScreenerFilterPanel } from './ScreenerFilterPanel'
 import { IntradayChart } from './IntradayChart'
+import { TickerMirror } from './TickerMirror'
 import type { Article, ScreenerRow } from '@/lib/types'
 
 const fetcher = (url: string) => fetch(url).then(r => r.json())
@@ -57,6 +58,8 @@ export function ScreenerPage() {
   const [search, setSearch] = useState('')
   const [page, setPage] = useState(0)
   const pageSize = 50
+  const [pinnedRows, setPinnedRows] = useState<ScreenerRow[]>([])
+  const [activePinned, setActivePinned] = useState<string | null>(null)
 
   const tickers: ScreenerRow[] = Array.isArray(data) ? data : data?.tickers ?? data?.rows ?? []
 
@@ -573,6 +576,19 @@ export function ScreenerPage() {
         onSort={handleSort}
         sortKey={orderBy}
         sortDir={orderDir}
+        pinnedTickers={pinnedRows.map(r => r.ticker)}
+        onPin={row => {
+          setPinnedRows(prev => {
+            const already = prev.find(r => r.ticker === row.ticker)
+            if (already) {
+              const next = prev.filter(r => r.ticker !== row.ticker)
+              if (activePinned === row.ticker) setActivePinned(next.length ? next[next.length - 1].ticker : null)
+              return next
+            }
+            setActivePinned(row.ticker)
+            return [...prev, row]
+          })
+        }}
       />
 
       {/* Pagination */}
@@ -600,6 +616,67 @@ export function ScreenerPage() {
             <button disabled={page >= totalPages - 1} onClick={() => setPage(p => p + 1)}
               className="px-2 py-1 text-xs bg-surface border border-border rounded text-neutral disabled:opacity-40 hover:text-white">Next</button>
           </div>
+        </div>
+      )}
+
+      {/* Pinned tickers bottom panel */}
+      {pinnedRows.length > 0 && (
+        <div className="mt-4 border border-border rounded-lg overflow-hidden bg-[#080f1a]">
+          {/* Tab bar */}
+          <div className="flex items-center bg-[#0c1420] border-b border-border/50 overflow-x-auto">
+            <span className="px-3 text-[10px] text-slate-500 uppercase tracking-wide shrink-0">Pinned</span>
+            {pinnedRows.map(row => (
+              <button
+                key={row.ticker}
+                onClick={() => setActivePinned(t => t === row.ticker ? t : row.ticker)}
+                className={`flex items-center gap-1.5 px-3 py-2 text-[11px] font-mono font-semibold whitespace-nowrap border-b-2 -mb-px transition-colors ${
+                  activePinned === row.ticker
+                    ? 'border-accent text-white bg-[#080f1a]'
+                    : 'border-transparent text-neutral hover:text-white'
+                }`}
+              >
+                {row.ticker}
+                {row.change_pct != null && (
+                  <span className={`text-[10px] font-normal ${(row.change_pct ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                    {(row.change_pct ?? 0) >= 0 ? '+' : ''}{row.change_pct.toFixed(1)}%
+                  </span>
+                )}
+                <span
+                  onClick={e => {
+                    e.stopPropagation()
+                    setPinnedRows(prev => {
+                      const next = prev.filter(r => r.ticker !== row.ticker)
+                      if (activePinned === row.ticker) setActivePinned(next.length ? next[next.length - 1].ticker : null)
+                      return next
+                    })
+                  }}
+                  className="ml-1 text-slate-600 hover:text-red-400 cursor-pointer leading-none"
+                >
+                  ×
+                </span>
+              </button>
+            ))}
+          </div>
+
+          {/* Active panel content */}
+          {activePinned && (() => {
+            const pinnedRow = pinnedRows.find(r => r.ticker === activePinned)
+            if (!pinnedRow) return null
+            return (
+              <TickerMirror
+                ticker={activePinned}
+                row={pinnedRow}
+                onClose={() => {
+                  setPinnedRows(prev => {
+                    const next = prev.filter(r => r.ticker !== activePinned)
+                    setActivePinned(next.length ? next[next.length - 1].ticker : null)
+                    return next
+                  })
+                }}
+                asPanel
+              />
+            )
+          })()}
         </div>
       )}
     </div>

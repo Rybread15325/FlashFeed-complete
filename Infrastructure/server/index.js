@@ -47,7 +47,21 @@ const MAX_SIGNAL_CHANGE_PCT = Math.max(10, Number(process.env.MAX_SIGNAL_CHANGE_
 const PRIVATE_TRACKED_TICKERS = new Set(['SPACEX'])
 
 // ── Middleware ────────────────────────────────────────────
-app.use(cors({ origin: ['http://localhost:5173', 'http://127.0.0.1:5173'] }))
+const ALLOWED_ORIGINS = [
+  'http://localhost:5173',
+  'http://127.0.0.1:5173',
+  process.env.VERCEL_FRONTEND_URL,
+  process.env.FRONTEND_URL,
+].filter(Boolean)
+app.use(cors({
+  origin: (origin, cb) => {
+    if (!origin || ALLOWED_ORIGINS.some(o => origin.startsWith(o)) || origin.includes('.vercel.app')) {
+      return cb(null, true)
+    }
+    cb(null, true) // permissive for dev; tighten in prod by returning cb(new Error('Not allowed'))
+  },
+  credentials: true,
+}))
 app.use(express.json({ limit: '2mb' }))
 
 // ── RAM speed layer: Redis hot cache + Kafka→Redis feed reads ─────────────────
@@ -2038,6 +2052,32 @@ app.get('/api/translate/status', (req, res) => {
 
 app.use('/api/articles',    articlesRouter)
 app.use('/api/screener',    screenerRouter)
+
+// Google News RSS fallback – returns up to 3 articles when local DB has none
+app.get('/api/articles/web-fallback', async (req, res) => {
+  const ticker = String(req.query.ticker || '').toUpperCase().trim()
+  if (!ticker) return res.status(400).json({ ok: false, error: 'ticker required' })
+  try {
+    const query = encodeURIComponent(`${ticker} stock`)
+    const rssUrl = `https://news.google.com/rss/search?q=${query}&hl=en-US&gl=US&ceid=US:en`
+    const xml = await fetch(rssUrl, { headers: { 'User-Agent': 'Mozilla/5.0 FlashFeed/1.0' } }).then(r => r.text())
+    const items = []
+    const itemRe = /<item>([\s\S]*?)<\/item>/g
+    let m
+    while ((m = itemRe.exec(xml)) !== null && items.length < 3) {
+      const block = m[1]
+      const title = (block.match(/<title><!\[CDATA\[(.*?)\]\]><\/title>/) || block.match(/<title>(.*?)<\/title>/))?.[1] || ''
+      const link  = (block.match(/<link>(.*?)<\/link>/) || block.match(/<guid[^>]*>(.*?)<\/guid>/))?.[1] || ''
+      const pubDate = block.match(/<pubDate>(.*?)<\/pubDate>/)?.[1] || ''
+      const source = block.match(/<source[^>]*>(.*?)<\/source>/)?.[1] || 'Google News'
+      if (title) items.push({ title: title.trim(), url: link.trim(), publishedAt: pubDate, source: source.trim(), fromWeb: true })
+    }
+    res.json({ ok: true, ticker, articles: items })
+  } catch (err) {
+    console.error('web-fallback failed:', err.message)
+    res.status(500).json({ ok: false, error: String(err.message) })
+  }
+})
 
 app.get("/api/momentum/trending", async (req, res) => {
   try {
