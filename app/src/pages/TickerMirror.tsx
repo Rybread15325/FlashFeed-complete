@@ -7,7 +7,7 @@ import { CandlestickChart } from './CandlestickChart'
 const fetcher = (url: string) => fetch(url).then(r => r.json())
 
 type MirrorTab = 'overview' | 'technicals' | 'financials' | 'correlation' | 'news'
-type NewsSubTab = 'news' | 'reddit'
+type NewsSubTab = 'news' | 'reddit' | 'twitter'
 
 interface Props {
   ticker: string
@@ -146,6 +146,10 @@ function TickerMirrorContent({ ticker, row, onClose }: { ticker: string; row: SR
   )
   const { data: redditData } = useSWR(
     newsSubTab === 'reddit' ? `/api/reddit/posts/${ticker}?limit=8` : null,
+    fetcher
+  )
+  const { data: twitterData } = useSWR(
+    newsSubTab === 'twitter' ? `/api/twitter/posts/${ticker}?limit=10` : null,
     fetcher
   )
 
@@ -434,17 +438,19 @@ function TickerMirrorContent({ ticker, row, onClose }: { ticker: string; row: SR
       {activeSection === 'news' && (
         <div>
           <div className="flex items-center border-b border-border/20 px-4">
-            {(['news', 'reddit'] as NewsSubTab[]).map(tab => (
+            {(['news', 'reddit', 'twitter'] as NewsSubTab[]).map(tab => (
               <button
                 key={tab}
                 onClick={() => setNewsSubTab(tab)}
-                className={`px-3 py-2 text-[11px] font-medium capitalize border-b-2 -mb-px transition-colors ${
+                className={`px-3 py-2 text-[11px] font-medium border-b-2 -mb-px transition-colors ${
                   newsSubTab === tab ? 'border-accent text-white' : 'border-transparent text-neutral hover:text-white'
                 }`}
               >
                 {tab === 'news'
                   ? `News${newsCount > 0 ? ` (${newsCount})` : ''}${isWebFallback ? ' · web' : ''}`
-                  : 'Reddit'}
+                  : tab === 'reddit'
+                  ? 'Reddit'
+                  : '𝕏 Twitter'}
               </button>
             ))}
           </div>
@@ -516,6 +522,44 @@ function TickerMirrorContent({ ticker, row, onClose }: { ticker: string; row: SR
                               <div className="text-[10px] text-neutral mt-0.5">
                                 r/{p.subreddit} · {p.num_comments} comments
                                 {p.created_utc ? ` · ${new Date(p.created_utc * 1000).toLocaleDateString()}` : ''}
+                              </div>
+                            </div>
+                          </a>
+                        ))}
+                      </div>
+                    )
+            )}
+
+            {newsSubTab === 'twitter' && (
+              !twitterData
+                ? <div className="text-xs text-neutral animate-pulse">Loading 𝕏 posts…</div>
+                : !twitterData.ok
+                  ? (
+                    <div className="text-xs text-neutral space-y-1">
+                      <span className="text-sky-400 font-medium block">𝕏 Twitter not configured.</span>
+                      <span>Add <code className="text-accent bg-bg/50 px-1 rounded">TWITTER_BEARER_TOKEN</code> to <code className="text-accent bg-bg/50 px-1 rounded">.env</code> and restart.</span>
+                      <span className="block text-slate-500 mt-1">Get your Bearer Token at <span className="text-sky-400">developer.x.com</span> → Projects &amp; Apps → Keys &amp; Tokens.</span>
+                    </div>
+                  )
+                  : (twitterData.posts ?? []).length === 0
+                    ? <div className="text-xs text-neutral">No recent 𝕏 posts found for ${ticker}.</div>
+                    : (
+                      <div className="flex flex-col gap-2">
+                        {(twitterData.posts as any[]).map(p => (
+                          <a key={p.id} href={p.url} target="_blank" rel="noreferrer" className="flex items-start gap-2 group">
+                            <div className="shrink-0 w-7 pt-0.5 flex flex-col items-center gap-0.5">
+                              <span className="text-sky-400 text-[11px] font-bold leading-none">𝕏</span>
+                              {p.likes > 0 && (
+                                <span className="text-[9px] text-neutral font-mono">{p.likes >= 1000 ? `${(p.likes / 1000).toFixed(1)}k` : p.likes}♥</span>
+                              )}
+                            </div>
+                            <div className="min-w-0">
+                              <div className="text-xs text-slate-200 group-hover:text-white leading-snug line-clamp-3">{p.text}</div>
+                              <div className="text-[10px] text-neutral mt-0.5 flex items-center gap-2">
+                                <span className="text-sky-500">@{p.author}</span>
+                                {p.retweets > 0 && <span>{p.retweets} RT</span>}
+                                {p.replies > 0  && <span>{p.replies} replies</span>}
+                                {p.created_at && <span>{new Date(p.created_at).toLocaleDateString()}</span>}
                               </div>
                             </div>
                           </a>

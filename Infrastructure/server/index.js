@@ -5666,6 +5666,73 @@ app.get('/api/reddit/posts/:ticker', async (req, res) => {
   }
 })
 
+// ── Twitter / X API v2 ────────────────────────────────────────────────────────
+const TWITTER_BEARER_TOKEN = process.env.TWITTER_BEARER_TOKEN || process.env.X_BEARER_TOKEN || ''
+
+app.get('/api/twitter/status', (req, res) => {
+  res.json({ configured: !!TWITTER_BEARER_TOKEN })
+})
+
+app.get('/api/twitter/posts/:ticker', async (req, res) => {
+  const ticker = (req.params.ticker || '').toUpperCase().trim()
+  if (!ticker) return res.status(400).json({ ok: false, posts: [], error: 'ticker required' })
+
+  if (!TWITTER_BEARER_TOKEN) {
+    return res.json({
+      ok: false,
+      posts: [],
+      error: 'Twitter API not configured. Add TWITTER_BEARER_TOKEN to .env (get from developer.x.com)',
+    })
+  }
+
+  const limit = Math.min(Math.max(1, Number(req.query.limit) || 10), 100)
+
+  try {
+    // Search cashtag + company name, exclude retweets, English only
+    const q = encodeURIComponent(`$${ticker} lang:en -is:retweet`)
+    const fields = 'created_at,public_metrics,author_id,text'
+    const expansions = 'author_id'
+    const userFields = 'username,name,verified'
+    const url = `https://api.twitter.com/2/tweets/search/recent?query=${q}&tweet.fields=${fields}&expansions=${expansions}&user.fields=${userFields}&max_results=${limit}`
+
+    const resp = await fetch(url, {
+      headers: { 'Authorization': `Bearer ${TWITTER_BEARER_TOKEN}` },
+    })
+
+    if (resp.status === 401) return res.json({ ok: false, posts: [], error: 'Twitter Bearer Token invalid or expired' })
+    if (resp.status === 403) return res.json({ ok: false, posts: [], error: 'Twitter API access forbidden — check your app permissions and plan' })
+    if (!resp.ok) return res.json({ ok: false, posts: [], error: `Twitter API error ${resp.status}` })
+
+    const data = await resp.json()
+    if (data.errors) return res.json({ ok: false, posts: [], error: data.errors[0]?.message || 'Twitter API error' })
+
+    // Build user lookup map from includes
+    const userMap = new Map()
+    for (const u of (data.includes?.users ?? [])) userMap.set(u.id, u)
+
+    const posts = (data.data ?? []).map(t => {
+      const user = userMap.get(t.author_id) || {}
+      return {
+        id:          t.id,
+        text:        t.text,
+        author:      user.username || t.author_id,
+        author_name: user.name || '',
+        verified:    user.verified || false,
+        likes:       t.public_metrics?.like_count    ?? 0,
+        retweets:    t.public_metrics?.retweet_count ?? 0,
+        replies:     t.public_metrics?.reply_count   ?? 0,
+        impressions: t.public_metrics?.impression_count ?? 0,
+        created_at:  t.created_at,
+        url:         `https://x.com/${user.username || 'i'}/status/${t.id}`,
+      }
+    })
+
+    res.json({ ok: true, ticker, posts, result_count: data.meta?.result_count ?? posts.length })
+  } catch (e) {
+    res.json({ ok: false, posts: [], error: String(e.message || e) })
+  }
+})
+
 // ── Session beacon: browser calls this on pagehide to trigger auto-save ──────
 app.post('/api/session/save', async (req, res) => {
   // Accepts text/plain body from navigator.sendBeacon
