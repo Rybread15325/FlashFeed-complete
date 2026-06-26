@@ -3,7 +3,7 @@ import { useState, useCallback, useEffect } from 'react'
 import { CandlestickChart } from './CandlestickChart'
 import { RSIChart } from './RSIChart'
 import { MACDChart } from './MACDChart'
-import { SentimentChart } from './SentimentChart'
+import { ResearchChart, type ResearchMode } from './ResearchChart'
 import { getAllChartStocks } from '../lib/stocks'
 
 interface ChartData {
@@ -19,26 +19,43 @@ interface ChartData {
   source_status?: { price?: string; price_source?: string; price_detail?: string; social?: string; news?: string; predictions?: string }
 }
 
-const RANGES = ['1d', '5d', '1mo', '3mo', '6mo', '1y'] as const
+const RANGES    = ['1d', '5d', '1mo', '3mo', '6mo', '1y'] as const
 const INTERVALS = ['1m', '5m', '15m', '1h', '1d', '1wk'] as const
-const RANGE_LABELS: Record<string, string> = { '1d': '1 Day', '5d': '5 Days', '1mo': '1 Month', '3mo': '3 Months', '6mo': '6 Months', '1y': '1 Year' }
-const INT_LABELS: Record<string, string> = { '1m': '1 Minute', '5m': '5 Minute', '15m': '15 Minute', '1h': 'Hourly', '1d': 'Daily', '1wk': 'Weekly' }
+const RANGE_LABELS: Record<string, string>    = { '1d': '1 Day', '5d': '5 Days', '1mo': '1 Month', '3mo': '3 Months', '6mo': '6 Months', '1y': '1 Year' }
+const INT_LABELS: Record<string, string>      = { '1m': '1m', '5m': '5m', '15m': '15m', '1h': '1h', '1d': '1d', '1wk': '1wk' }
+
+type View = 'candles' | ResearchMode
+
+const VIEWS: Array<{ key: View; label: string }> = [
+  { key: 'candles', label: 'Candlestick + Indicators' },
+  { key: 'pd',      label: 'Price + Density' },
+  { key: 'sent',    label: 'Sentiment Score' },
+  { key: 'ds',      label: 'Density vs Sentiment' },
+]
+
+const WIN_OPTS: Array<{ key: 'full' | '2h' | '1h'; label: string }> = [
+  { key: 'full', label: 'Full' },
+  { key: '2h',   label: 'Last 2h' },
+  { key: '1h',   label: 'Last 1h' },
+]
 
 export function ChartsPage() {
-  const [ticker, setTicker] = useState('AAPL')
-  const [range, setRange] = useState<string>('1d')
-  const [interval, setInterval] = useState<string>('1m')
-  const [data, setData] = useState<ChartData | null>(null)
-  const [loading, setLoading] = useState(false)
+  const [ticker, setTicker]         = useState('AAPL')
+  const [range, setRange]           = useState<string>('1d')
+  const [interval, setInterval]     = useState<string>('1m')
+  const [data, setData]             = useState<ChartData | null>(null)
+  const [loading, setLoading]       = useState(false)
   const [activeTicker, setActiveTicker] = useState<string | null>(null)
   const [autoLoaded, setAutoLoaded] = useState(false)
+  const [view, setView]             = useState<View>('candles')
+  const [win, setWin]               = useState<'full' | '2h' | '1h'>('full')
 
   const loadChart = useCallback(async (override?: string) => {
     const sym = (typeof override === 'string' ? override : ticker).trim().toUpperCase()
     if (!sym) return
     setLoading(true)
     try {
-      const res = await fetch(`/api/charts/${sym}?range=${range}&interval=${interval}`)
+      const res  = await fetch(`/api/charts/${sym}?range=${range}&interval=${interval}`)
       const json = await res.json()
       setData(json)
       setActiveTicker(sym)
@@ -48,97 +65,142 @@ export function ChartsPage() {
   }, [ticker, range, interval])
 
   useEffect(() => {
-    if (!autoLoaded && !data && !loading) {
-      setAutoLoaded(true)
-      loadChart()
-    }
+    if (!autoLoaded && !data && !loading) { setAutoLoaded(true); loadChart() }
   }, [autoLoaded, data, loading, loadChart])
+
+  // Adapt ChartData to the number-time format ResearchChart expects
+  const researchData = data ? {
+    candles:        (data.candles ?? []).map(c => ({ ...c, time: typeof c.time === 'string' ? Math.floor(Date.parse(c.time) / 1000) : Number(c.time) })),
+    social_density: (data.social_density ?? []).map(d => ({ ...d, time: typeof d.time === 'string' ? Math.floor(Date.parse(d.time) / 1000) : Number(d.time), value: d.value })),
+    sentiment:      (data.sentiment ?? []).map(s => ({ ...s, time: typeof s.time === 'string' ? Math.floor(Date.parse(s.time) / 1000) : Number(s.time) })),
+  } : null
 
   return (
     <div>
       {/* Toolbar */}
-      <div className="flex items-center gap-3 mb-4 flex-wrap">
+      <div className="flex items-center gap-2 mb-3 flex-wrap">
         <select
           value={getAllChartStocks().includes(ticker) ? ticker : ''}
           onChange={e => { const v = e.target.value; if (v) { setTicker(v); loadChart(v) } }}
-          title="Top 50 stocks + your custom stocks (add them in Settings)"
           className="bg-bg border border-border text-sm text-neutral rounded px-2 py-2 focus:outline-none focus:border-accent"
         >
           <option value="">Top stocks ▾</option>
           {getAllChartStocks().map(t => <option key={t} value={t}>{t}</option>)}
         </select>
+
         <input
           value={ticker}
           onChange={e => setTicker(e.target.value.toUpperCase())}
           onKeyDown={e => e.key === 'Enter' && loadChart()}
-          placeholder="Ticker (e.g. AAPL)"
-          className="w-[140px] bg-bg border border-border text-sm text-white rounded px-3 py-2 font-mono focus:outline-none focus:border-accent placeholder:text-slate-600"
+          placeholder="Ticker…"
+          className="w-[120px] bg-bg border border-border text-sm text-white rounded px-3 py-2 font-mono focus:outline-none focus:border-accent placeholder:text-slate-600"
         />
+
         <select value={range} onChange={e => setRange(e.target.value)}
           className="bg-bg border border-border text-sm text-neutral rounded px-2 py-2 focus:outline-none focus:border-accent">
           {RANGES.map(r => <option key={r} value={r}>{RANGE_LABELS[r]}</option>)}
         </select>
+
         <select value={interval} onChange={e => setInterval(e.target.value)}
           className="bg-bg border border-border text-sm text-neutral rounded px-2 py-2 focus:outline-none focus:border-accent">
           {INTERVALS.map(i => <option key={i} value={i}>{INT_LABELS[i]}</option>)}
         </select>
+
         <button
-          onClick={loadChart}
+          onClick={() => loadChart()}
           disabled={loading || !ticker.trim()}
           className="px-4 py-2 bg-accent text-white text-sm font-medium rounded hover:bg-sky-400 disabled:opacity-50 transition-colors"
         >
-          {loading ? 'Loading...' : 'Load Chart'}
+          {loading ? 'Loading…' : 'Load Chart'}
         </button>
-        {activeTicker && (
-          <span className="text-accent font-mono font-bold text-lg ml-2">{activeTicker}</span>
+
+        {activeTicker && <span className="text-accent font-mono font-bold text-lg ml-1">{activeTicker}</span>}
+
+        {/* Window selector (research views only) */}
+        {view !== 'candles' && (
+          <div className="flex items-stretch rounded overflow-hidden border border-border ml-auto">
+            {WIN_OPTS.map(w => (
+              <button key={w.key} onClick={() => setWin(w.key)}
+                className={`px-3 py-1.5 text-xs transition-colors ${win === w.key ? 'bg-accent text-white' : 'bg-surface text-neutral hover:text-white'}`}>
+                {w.label}
+              </button>
+            ))}
+          </div>
         )}
       </div>
 
-      {/* Charts */}
+      {/* View tabs */}
+      <div className="flex items-center gap-0 mb-3 border-b border-border">
+        {VIEWS.map(v => (
+          <button key={v.key} onClick={() => setView(v.key)}
+            className={`px-3 py-1.5 text-xs transition-colors border-b-2 -mb-px ${
+              view === v.key ? 'text-white border-accent' : 'text-neutral border-transparent hover:text-white'
+            }`}>
+            {v.label}
+          </button>
+        ))}
+        <span className="ml-auto text-[10px] text-neutral pr-2">extended hours · 04:00–20:00 ET</span>
+      </div>
+
+      {/* Chart area */}
       {data ? (
-        <div className="space-y-3">
-          <div className="grid grid-cols-2 md:grid-cols-6 gap-2">
-            <Status label="Price" value={data.source_status?.price ?? 'unknown'} />
-            <Status label="Source" value={data.source_status?.price_source ?? 'pending'} />
-            <Status label="Social" value={data.source_status?.social ?? 'pending'} />
-            <Status label="News Markers" value={String(data.news_events?.length ?? 0)} />
-            <Status label="Predictions" value={String(data.prediction_events?.length ?? 0)} />
-            <Status label="Bars" value={String(data.candles?.length ?? 0)} />
-          </div>
-          <ChartCard title={`${INT_LABELS[interval] ?? interval} Price + Bollinger Bands`} height={300}>
-            {data.candles?.length
-              ? <CandlestickChart
-                  candles={data.candles as any}
-                  bollinger={data.bollinger as any}
-                  predicted={data.predicted as any}
-                  newsEvents={data.news_events as any}
-                  density={data.social_density as any}
-                  sentiment={data.sentiment as any}
-                />
-              : <EmptyChart message={data.source_status?.price_detail || 'No price bars returned for this interval.'} />}
-          </ChartCard>
-          <ChartCard title="Rolling Message Density" height={120}>
-            <SentimentChart data={(data.social_density ?? []).map(row => ({ time: row.time as any, value: row.scaled ?? row.value }))} />
-          </ChartCard>
-          <ChartCard title="Rolling Message Sentiment" height={120}>
-            <SentimentChart data={data.sentiment ?? []} />
-          </ChartCard>
-          <PredictionEvents events={data.prediction_events ?? []} />
-          <ChartCard title="RSI (14)" height={120}>
-            <RSIChart data={data.rsi ?? []} />
-          </ChartCard>
-          <ChartCard title="MACD (12,26,9)" height={120}>
-            <MACDChart data={data.macd} />
-          </ChartCard>
-        </div>
+        <>
+          {view === 'candles' && (
+            <div className="space-y-3">
+              <div className="grid grid-cols-2 md:grid-cols-6 gap-2">
+                <Status label="Price"       value={data.source_status?.price ?? 'unknown'} />
+                <Status label="Source"      value={data.source_status?.price_source ?? 'pending'} />
+                <Status label="Social"      value={data.source_status?.social ?? 'pending'} />
+                <Status label="News Markers" value={String(data.news_events?.length ?? 0)} />
+                <Status label="Predictions" value={String(data.prediction_events?.length ?? 0)} />
+                <Status label="Bars"        value={String(data.candles?.length ?? 0)} />
+              </div>
+
+              <ChartCard title={`${INT_LABELS[interval] ?? interval} Price + Bollinger Bands`} height={300}>
+                {data.candles?.length
+                  ? <CandlestickChart
+                      candles={data.candles as any}
+                      bollinger={data.bollinger as any}
+                      predicted={data.predicted as any}
+                      newsEvents={data.news_events as any}
+                      density={data.social_density as any}
+                      sentiment={data.sentiment as any}
+                    />
+                  : <EmptyChart message={data.source_status?.price_detail || 'No price bars returned for this interval.'} />}
+              </ChartCard>
+
+              <PredictionEvents events={data.prediction_events ?? []} />
+
+              <ChartCard title="RSI (14)" height={120}>
+                <RSIChart data={data.rsi ?? []} />
+              </ChartCard>
+              <ChartCard title="MACD (12,26,9)" height={120}>
+                <MACDChart data={data.macd} />
+              </ChartCard>
+            </div>
+          )}
+
+          {(view === 'pd' || view === 'sent' || view === 'ds') && (
+            <div className="bg-surface border border-border rounded-lg overflow-hidden" style={{ height: 460 }}>
+              <ResearchChart
+                ticker={activeTicker ?? ticker}
+                mode={view}
+                data={researchData}
+                win={win}
+              />
+            </div>
+          )}
+        </>
       ) : (
-        <div className="text-center py-20 text-neutral">
-          <div className="text-sm">Loading the default candle chart...</div>
+        <div className="text-center py-20 text-neutral text-sm">
+          {loading ? 'Loading chart…' : 'Enter a ticker and click Load Chart.'}
         </div>
       )}
     </div>
   )
 }
+
+// ── Sub-components ─────────────────────────────────────────────────────────────
 
 function eventTime(value: string | number) {
   const sec = typeof value === 'number' ? value : Math.floor(Date.parse(value) / 1000)
@@ -155,7 +217,7 @@ function PredictionEvents({ events }: { events: NonNullable<ChartData['predictio
       </div>
       <div className="divide-y divide-border/60">
         {events.slice(-5).map((event, index) => {
-          const actual = event.label_5m?.return_pct
+          const actual  = event.label_5m?.return_pct
           const correct = event.label_5m?.direction_correct
           return (
             <div key={`${event.time}-${index}`} className="grid grid-cols-[86px_1fr_100px] gap-2 px-3 py-2 text-xs items-center">
@@ -183,9 +245,7 @@ function Status({ label, value }: { label: string; value: string }) {
 
 function EmptyChart({ message }: { message: string }) {
   return (
-    <div className="h-full flex items-center justify-center px-4 text-center text-xs text-neutral">
-      {message}
-    </div>
+    <div className="h-full flex items-center justify-center px-4 text-center text-xs text-neutral">{message}</div>
   )
 }
 

@@ -12,6 +12,7 @@
     "dev:full": "concurrently \"npm run dev\" \"npm run server:dev\""
   },
   "dependencies": {
+    "chart.js": "^4.5.1",
     "clsx": "^2.1.1",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
