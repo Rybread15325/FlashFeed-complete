@@ -2873,50 +2873,98 @@ function yahooIntervalFor(interval) {
   return "1d"
 }
 
+// Yahoo Finance crumb/cookie cache (valid ~24h)
+let _yahooCrumb = null
+let _yahooCookieStr = null
+let _yahooAuthAt = 0
+const YAHOO_AUTH_TTL_MS = 20 * 60 * 60 * 1000 // 20 hours
+
+async function getYahooCrumb() {
+  if (_yahooCrumb && (Date.now() - _yahooAuthAt) < YAHOO_AUTH_TTL_MS) {
+    return { crumb: _yahooCrumb, cookie: _yahooCookieStr }
+  }
+  const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+
+  // Step 1: hit Yahoo Finance to get session cookies
+  const r1 = await fetch('https://finance.yahoo.com/', {
+    headers: { 'User-Agent': UA, 'Accept-Language': 'en-US,en;q=0.9' },
+    redirect: 'follow',
+    signal: AbortSignal.timeout(8000),
+  })
+  const rawCookies = r1.headers.getSetCookie?.() ?? (r1.headers.get('set-cookie') ? [r1.headers.get('set-cookie')] : [])
+  const cookieStr = rawCookies.map(c => c.split(';')[0]).join('; ')
+
+  // Step 2: get crumb
+  const r2 = await fetch('https://query1.finance.yahoo.com/v1/test/getcrumb', {
+    headers: { 'User-Agent': UA, 'Cookie': cookieStr, 'Accept': '*/*' },
+    signal: AbortSignal.timeout(8000),
+  })
+  const crumb = (await r2.text()).trim()
+  if (!crumb || crumb.length < 3) throw new Error('Yahoo crumb fetch failed')
+
+  _yahooCrumb = crumb
+  _yahooCookieStr = cookieStr
+  _yahooAuthAt = Date.now()
+  return { crumb, cookie: cookieStr }
+}
+
 async function fetchYahooCandles(ticker, range, interval) {
   const yahooRange = yahooRangeFor(range, interval)
   const yahooInterval = yahooIntervalFor(interval)
+  const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 
-  const now = new Date()
-  const rangeDays = { '1d': 1, '5d': 5, '1mo': 30, '3mo': 90, '6mo': 180, '1y': 365, '2y': 730, '5y': 1825 }
-  const days = rangeDays[yahooRange] ?? 90
-  const d1 = new Date(now.getTime() - days * 86400 * 1000)
-  const fmt = d => d.toISOString().slice(0, 10).replace(/-/g, '')
+  const { crumb, cookie } = await getYahooCrumb()
 
-  // Stooq: free, no-auth, works from server IPs
-  const stooqInterval = yahooInterval === '1wk' ? 'w' : 'd'
-  const url = `https://stooq.com/q/d/l/?s=${encodeURIComponent(ticker)}.US&d1=${fmt(d1)}&d2=${fmt(now)}&i=${stooqInterval}`
+  const url = new URL(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}`)
+  url.searchParams.set('range', yahooRange)
+  url.searchParams.set('interval', yahooInterval)
+  url.searchParams.set('includePrePost', 'true')
+  url.searchParams.set('events', 'history')
+  url.searchParams.set('crumb', crumb)
 
   const resp = await fetch(url, {
-    headers: { 'User-Agent': 'Mozilla/5.0 (compatible; FlashFeed/1.0)' },
+    headers: { 'User-Agent': UA, 'Cookie': cookie, 'Accept': 'application/json' },
     signal: AbortSignal.timeout(10000),
   })
-  if (!resp.ok) throw new Error(`Stooq HTTP ${resp.status}`)
-  const csv = await resp.text()
 
+  // If 401, crumb expired — invalidate and retry once
+  if (resp.status === 401) {
+    _yahooCrumb = null
+    const { crumb: c2, cookie: k2 } = await getYahooCrumb()
+    url.searchParams.set('crumb', c2)
+    const resp2 = await fetch(url, {
+      headers: { 'User-Agent': UA, 'Cookie': k2, 'Accept': 'application/json' },
+      signal: AbortSignal.timeout(10000),
+    })
+    if (!resp2.ok) throw new Error(`Yahoo HTTP ${resp2.status}`)
+    return parseYahooChartResponse(await resp2.json(), yahooRange, yahooInterval)
+  }
+
+  if (!resp.ok) throw new Error(`Yahoo HTTP ${resp.status}`)
+  return parseYahooChartResponse(await resp.json(), yahooRange, yahooInterval)
+}
+
+function parseYahooChartResponse(payload, yahooRange, yahooInterval) {
+  const result = payload?.chart?.result?.[0]
+  const timestamps = result?.timestamp || []
+  const quote = result?.indicators?.quote?.[0] || {}
   const candles = []
-  const lines = csv.trim().split('\n')
-  for (let i = 1; i < lines.length; i++) {
-    const [dateStr, openStr, highStr, lowStr, closeStr, volumeStr] = lines[i].split(',')
-    if (!dateStr || dateStr === 'No data') break
-    const open  = Number(openStr)
-    const high  = Number(highStr)
-    const low   = Number(lowStr)
-    const close = Number(closeStr)
+  for (let i = 0; i < timestamps.length; i++) {
+    const open  = Number(quote.open?.[i])
+    const high  = Number(quote.high?.[i])
+    const low   = Number(quote.low?.[i])
+    const close = Number(quote.close?.[i])
     if (![open, high, low, close].every(Number.isFinite)) continue
     if (open <= 0 || high <= 0 || low <= 0 || close <= 0) continue
-    const time = Math.floor(new Date(dateStr).getTime() / 1000)
     candles.push({
-      time,
+      time:   Number(timestamps[i]),
       open:   Number(open.toFixed(4)),
       high:   Number(high.toFixed(4)),
       low:    Number(low.toFixed(4)),
       close:  Number(close.toFixed(4)),
-      volume: Number.isFinite(Number(volumeStr)) ? Number(volumeStr) : 0,
+      volume: Number.isFinite(Number(quote.volume?.[i])) ? Number(quote.volume[i]) : 0,
     })
   }
-  // Stooq returns newest-first — sort ascending for chart
-  candles.sort((a, b) => a.time - b.time)
   return { candles, provider_range: yahooRange, provider_interval: yahooInterval }
 }
 
