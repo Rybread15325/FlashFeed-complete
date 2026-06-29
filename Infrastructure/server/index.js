@@ -2908,6 +2908,61 @@ async function getYahooCrumb() {
   return { crumb, cookie: cookieStr }
 }
 
+// Fetch up to 30 recent StockTwits messages for a ticker and upsert into socials.
+// Uses the public unauthenticated endpoint — no key required, ~200 req/hr limit.
+async function fetchStockTwitsForTicker(db, ticker) {
+  try {
+    const url = `https://api.stocktwits.com/api/2/streams/symbol/${encodeURIComponent(ticker)}.json?limit=30`
+    const resp = await fetch(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0 FlashFeed/1.0' },
+      signal: AbortSignal.timeout(12000),
+    })
+    if (!resp.ok) return 0
+    const json = await resp.json()
+    const messages = Array.isArray(json.messages) ? json.messages : []
+    if (!messages.length) return 0
+
+    let inserted = 0
+    for (const msg of messages) {
+      const stId = String(msg.id || '')
+      if (!stId) continue
+      const sentimentRaw = msg.entities?.sentiment?.basic || ''
+      const sentimentScore = /bullish/i.test(sentimentRaw) ? 1 : /bearish/i.test(sentimentRaw) ? -1 : 0
+      const createdSec = msg.created_at
+        ? Math.floor(new Date(msg.created_at).getTime() / 1000)
+        : Math.floor(Date.now() / 1000)
+
+      const doc = {
+        platform: 'stocktwits',
+        collector: 'node_stocktwits',
+        ticker,
+        symbol: ticker,
+        text: String(msg.body || ''),
+        author: msg.user?.username || '',
+        sentiment: sentimentRaw || 'Neutral',
+        sentiment_score: sentimentScore,
+        url: `https://stocktwits.com/symbol/${ticker}`,
+        fetched_at: Math.floor(Date.now() / 1000),
+        detected_at: createdSec,
+        timestamp: createdSec,
+        created_at: new Date((createdSec) * 1000),
+        source: 'stocktwits',
+        _st_id: stId,
+      }
+      const result = await db.collection('socials').updateOne(
+        { _st_id: stId },
+        { $setOnInsert: doc },
+        { upsert: true }
+      )
+      if (result.upsertedCount) inserted++
+    }
+    return inserted
+  } catch (err) {
+    console.warn('[stocktwits] fetch failed for', ticker, err.message)
+    return 0
+  }
+}
+
 async function fetchYahooCandles(ticker, range, interval) {
   const yahooRange = yahooRangeFor(range, interval)
   const yahooInterval = yahooIntervalFor(interval)
@@ -3267,11 +3322,17 @@ app.get("/api/charts/:ticker", async (req, res) => {
       priceDetail = String(err.message || err)
     }
 
-    const [socialRows, newsEvents, predictionEvents] = await Promise.all([
+    let [socialRows, newsEvents, predictionEvents] = await Promise.all([
       chartSocialSeries(db, ticker, socialWindow, socialBucket),
       chartNewsEvents(db, ticker, socialWindow),
       chartPredictionEvents(db, ticker, socialWindow),
     ])
+
+    // If no social data in DB, fetch live from StockTwits and retry once
+    if (socialRows.length === 0) {
+      await fetchStockTwitsForTicker(db, ticker)
+      socialRows = await chartSocialSeries(db, ticker, socialWindow, socialBucket)
+    }
     const candles = candleResult.candles
     const chartEvents = [...newsEvents, ...chartSocialEvents(socialRows), ...predictionEvents].sort((a, b) => Number(a.time || 0) - Number(b.time || 0))
     res.json({
