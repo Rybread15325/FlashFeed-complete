@@ -5,6 +5,7 @@ interface Props {
   interval?: string  // '1' | '5' | '15' | '30' | '60' | 'D' | 'W'
   height?: number
   hideToolbar?: boolean
+  studies?: string[] // e.g. ['RSI@tv-basicstudies', 'MACD@tv-basicstudies']
 }
 
 declare global {
@@ -16,7 +17,7 @@ const intervalMap: Record<string, string> = {
   '1h': '60', '1d': 'D', '1wk': 'W',
 }
 
-export function TradingViewChart({ ticker, interval = '1d', height = 260, hideToolbar = false }: Props) {
+export function TradingViewChart({ ticker, interval = '1d', height = 260, hideToolbar = false, studies = [] }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const widgetRef = useRef<any>(null)
   const uid = `tv_${ticker.replace(/[^a-zA-Z0-9]/g, '_')}_${Math.random().toString(36).slice(2, 7)}`
@@ -45,6 +46,7 @@ export function TradingViewChart({ ticker, interval = '1d', height = 260, hideTo
         withdateranges: !hideToolbar,
         backgroundColor: '#0c1a2e',
         gridColor: 'rgba(255,255,255,0.04)',
+        studies,
       })
     }
 
@@ -67,7 +69,7 @@ export function TradingViewChart({ ticker, interval = '1d', height = 260, hideTo
     return () => {
       if (containerRef.current) containerRef.current.innerHTML = ''
     }
-  }, [ticker, interval, height])
+  }, [ticker, interval, height, studies.join(',')])
 
   return (
     <div ref={containerRef} style={{ height, width: '100%' }} className="overflow-hidden rounded" />

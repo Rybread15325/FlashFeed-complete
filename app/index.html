@@ -5,7 +5,18 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>FlashFeed</title>
     <!-- Google Translate: hidden widget used for full-page translation -->
-    <style>#google_translate_element{display:none!important;visibility:hidden!important;}.goog-te-banner-frame{display:none!important;}.goog-te-gadget{display:none!important;}body{top:0!important;}</style>
+    <style>
+      /* Hide the Google Translate widget div itself (we trigger it programmatically) */
+      #google_translate_element { display: none !important; visibility: hidden !important; }
+      .goog-te-gadget { display: none !important; }
+      /* When Google Translate is active it sets body { top: -40px } which hides top content.
+         Counter that by pushing the body down the same amount so the bar sits above the page. */
+      html.translated-ltr body,
+      html.translated-rtl body {
+        top: 0 !important;
+        margin-top: 40px !important;
+      }
+    </style>
   </head>
   <body>
     <div id="google_translate_element"></div>

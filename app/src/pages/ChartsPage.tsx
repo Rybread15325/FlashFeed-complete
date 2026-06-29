@@ -161,9 +161,10 @@ export function ChartsPage() {
                 <div className="text-[10px] text-slate-500 px-1">Live chart via TradingView · social &amp; prediction overlays require a data fetch</div>
               )}
 
-              <ChartCard title={`${INT_LABELS[interval] ?? interval} Price + Bollinger Bands`} height={300}>
-                {data.candles?.length
-                  ? <CandlestickChart
+              {data.candles?.length ? (
+                <>
+                  <ChartCard title={`${INT_LABELS[interval] ?? interval} Price + Bollinger Bands`} height={300}>
+                    <CandlestickChart
                       candles={data.candles as any}
                       bollinger={data.bollinger as any}
                       predicted={data.predicted as any}
@@ -171,17 +172,25 @@ export function ChartsPage() {
                       density={data.social_density as any}
                       sentiment={data.sentiment as any}
                     />
-                  : <TradingViewChart ticker={activeTicker ?? ticker} interval={interval} height={300} />}
-              </ChartCard>
-
-              <PredictionEvents events={data.prediction_events ?? []} />
-
-              <ChartCard title="RSI (14)" height={120}>
-                <RSIChart data={data.rsi ?? []} />
-              </ChartCard>
-              <ChartCard title="MACD (12,26,9)" height={120}>
-                <MACDChart data={data.macd} />
-              </ChartCard>
+                  </ChartCard>
+                  <PredictionEvents events={data.prediction_events ?? []} />
+                  <ChartCard title="RSI (14)" height={120}>
+                    <RSIChart data={data.rsi ?? []} />
+                  </ChartCard>
+                  <ChartCard title="MACD (12,26,9)" height={120}>
+                    <MACDChart data={data.macd} />
+                  </ChartCard>
+                </>
+              ) : (
+                <ChartCard title={`${activeTicker ?? ticker} — Price · RSI · MACD (via TradingView)`} height={560}>
+                  <TradingViewChart
+                    ticker={activeTicker ?? ticker}
+                    interval={interval}
+                    height={560}
+                    studies={['RSI@tv-basicstudies', 'MACD@tv-basicstudies']}
+                  />
+                </ChartCard>
+              )}
             </div>
           )}
 
