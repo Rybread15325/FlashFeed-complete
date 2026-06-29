@@ -69,6 +69,42 @@ export function ChartsPage() {
     if (!autoLoaded && !data && !loading) { setAutoLoaded(true); loadChart() }
   }, [autoLoaded, data, loading, loadChart])
 
+  // When the backend returns no social/sentiment data, fetch from /api/social/rolling
+  // (which works) and compute 5-min density+sentiment buckets client-side.
+  useEffect(() => {
+    const sym = activeTicker
+    if (!sym || !data) return
+    if ((data.social_density?.length ?? 0) > 0) return // already have data
+
+    const BUCKET = 5 * 60 // 5-minute buckets in seconds
+    fetch(`/api/social/rolling?ticker=${encodeURIComponent(sym)}&window_minutes=1440&limit=1000`)
+      .then(r => r.json())
+      .then(json => {
+        const posts: any[] = json.rows ?? []
+        if (!posts.length) return
+        const buckets = new Map<number, { count: number; scoreSum: number }>()
+        for (const p of posts) {
+          const sec = Number(p.fetched_at ?? p.timestamp ?? p.detected_at ?? p.created_at ?? 0)
+          if (!sec) continue
+          const key = Math.floor(sec / BUCKET) * BUCKET
+          const b = buckets.get(key) ?? { count: 0, scoreSum: 0 }
+          b.count++
+          const score =
+            typeof p.sentiment_score === 'number' ? p.sentiment_score :
+            /bull|positive/i.test(String(p.sentiment ?? '')) ? 1 :
+            /bear|negative/i.test(String(p.sentiment ?? '')) ? -1 : 0
+          b.scoreSum += score
+          buckets.set(key, b)
+        }
+        const sorted = Array.from(buckets.entries()).sort(([a], [b]) => a - b)
+        if (!sorted.length) return
+        const density  = sorted.map(([t, b]) => ({ time: t, value: +(b.count / 5).toFixed(3), count: b.count }))
+        const sentArr  = sorted.map(([t, b]) => ({ time: t, value: +(b.scoreSum / b.count).toFixed(3) }))
+        setData(prev => prev ? { ...prev, social_density: density, sentiment: sentArr } : prev)
+      })
+      .catch(() => {})
+  }, [activeTicker, data])
+
   // Adapt ChartData to the number-time format ResearchChart expects
   const researchData = data ? {
     candles:        (data.candles ?? []).map(c => ({ ...c, time: typeof c.time === 'string' ? Math.floor(Date.parse(c.time) / 1000) : Number(c.time) })),
