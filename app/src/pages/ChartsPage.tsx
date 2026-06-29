@@ -1,6 +1,7 @@
 'use client'
 import { useState, useCallback, useEffect } from 'react'
 import { CandlestickChart } from './CandlestickChart'
+import { TradingViewChart } from '@/components/charts/TradingViewChart'
 import { RSIChart } from './RSIChart'
 import { MACDChart } from './MACDChart'
 import { ResearchChart, type ResearchMode } from './ResearchChart'
@@ -166,7 +167,7 @@ export function ChartsPage() {
                       density={data.social_density as any}
                       sentiment={data.sentiment as any}
                     />
-                  : <EmptyChart message={data.source_status?.price_detail || 'No price bars returned for this interval.'} />}
+                  : <TradingViewChart ticker={activeTicker ?? ticker} interval={interval} height={300} />}
               </ChartCard>
 
               <PredictionEvents events={data.prediction_events ?? []} />

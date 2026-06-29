@@ -3,6 +3,7 @@ import { useState } from 'react'
 import useSWR from 'swr'
 import type { Article, ScreenerRow as SR } from '@/lib/types'
 import { CandlestickChart } from './CandlestickChart'
+import { TradingViewChart } from '@/components/charts/TradingViewChart'
 import { RollingWindowsTable } from './RollingWindowsTable'
 import { TickerEnrichPanels } from './TickerEnrichPanels'
 import { useTranslatedText } from '@/lib/translation'
@@ -190,7 +191,6 @@ function TickerMirrorContent({ ticker, row, onClose }: { ticker: string; row: SR
     fetcher
   )
 
-  const chartLoading  = chartData === undefined
   const candles       = chartData?.candles ?? []
   const bollinger     = chartData?.bollinger
   const predicted     = chartData?.predicted ?? []
@@ -326,12 +326,10 @@ function TickerMirrorContent({ ticker, row, onClose }: { ticker: string; row: SR
         <div className="flex divide-x divide-border/20">
           <div className="flex-1 min-w-0 p-3">
             <div className="h-[260px]">
-              {chartLoading ? (
-                <div className="h-full flex items-center justify-center text-neutral text-xs animate-pulse">Loading chart…</div>
-              ) : candles.length > 0 ? (
+              {candles.length > 0 ? (
                 <CandlestickChart candles={candles} bollinger={bollinger} predicted={predicted} newsEvents={[]} />
               ) : (
-                <div className="h-full flex items-center justify-center text-neutral text-xs">No chart data for {ticker}</div>
+                <TradingViewChart ticker={ticker} interval={interval} height={260} />
               )}
             </div>
           </div>
