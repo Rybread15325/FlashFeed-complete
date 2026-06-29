@@ -2968,6 +2968,61 @@ async function fetchStockTwitsForTicker(db, ticker) {
   }
 }
 
+async function fetchRedditForTicker(db, ticker) {
+  try {
+    const query = encodeURIComponent(`${ticker} stock`)
+    const url = `https://www.reddit.com/search.json?q=${query}&sort=new&limit=25&t=week&type=link`
+    const ctrl = new AbortController()
+    const tmo = setTimeout(() => ctrl.abort(), 12000)
+    const resp = await fetch(url, {
+      headers: { 'User-Agent': 'FlashFeed/1.0 (financial dashboard; contact via github.com/Rybread15325)' },
+      signal: ctrl.signal,
+    })
+    clearTimeout(tmo)
+    if (!resp.ok) return 0
+    const json = await resp.json()
+    const children = Array.isArray(json?.data?.children) ? json.data.children : []
+    if (!children.length) return 0
+
+    let inserted = 0
+    for (const c of children) {
+      const post = c.data
+      const redditId = String(post?.id || '')
+      if (!redditId) continue
+      const createdSec = post.created_utc ? Math.floor(Number(post.created_utc)) : Math.floor(Date.now() / 1000)
+      const text = `${post.title || ''} ${post.selftext || ''}`.trim()
+
+      const doc = {
+        platform: 'reddit',
+        collector: 'node_reddit',
+        ticker,
+        symbol: ticker,
+        text,
+        author: post.author || '',
+        sentiment: 'Neutral',
+        sentiment_score: 0,
+        url: `https://www.reddit.com${post.permalink || ''}`,
+        fetched_at: Math.floor(Date.now() / 1000),
+        detected_at: createdSec,
+        timestamp: createdSec,
+        created_at: new Date(createdSec * 1000),
+        source: 'reddit',
+        _reddit_id: redditId,
+      }
+      const result = await db.collection('socials').updateOne(
+        { _reddit_id: redditId },
+        { $setOnInsert: doc },
+        { upsert: true }
+      )
+      if (result.upsertedCount) inserted++
+    }
+    return inserted
+  } catch (err) {
+    console.warn('[reddit] fetch failed for', ticker, err.message)
+    return 0
+  }
+}
+
 async function computeArticleSentimentSeries(db, ticker, windowMinutes, bucketMinutes) {
   const sinceSec = Math.floor(Date.now() / 1000) - windowMinutes * 60
   const bucketSec = bucketMinutes * 60
@@ -3407,6 +3462,11 @@ app.get("/api/charts/:ticker", async (req, res) => {
     // If no social data in DB, fetch live from StockTwits and retry once
     if (socialRows.length === 0) {
       await fetchStockTwitsForTicker(db, ticker)
+      socialRows = await chartSocialSeries(db, ticker, socialWindow, socialBucket)
+    }
+    // Still nothing — try Reddit's public search
+    if (socialRows.length === 0) {
+      await fetchRedditForTicker(db, ticker)
       socialRows = await chartSocialSeries(db, ticker, socialWindow, socialBucket)
     }
     // If still no social data, fall back to article-based sentiment series
@@ -5994,47 +6054,28 @@ app.get('/api/reddit/status', async (req, res) => {
     tokenOk = !!tok
   }
   res.json({
-    configured,
+    configured: true, // public JSON search needs no credentials
+    oauth_configured: configured,
     token_ok: tokenOk,
     client_id_set: !!REDDIT_CLIENT_ID,
     client_secret_set: !!REDDIT_CLIENT_SECRET,
   })
 })
 
-app.get('/api/reddit/posts/:ticker', async (req, res) => {
-  const ticker = (req.params.ticker || '').toUpperCase().trim()
-  if (!ticker) return res.status(400).json({ ok: false, posts: [], error: 'ticker required' })
-
-  const limit = Math.min(Number(req.query.limit) || 10, 25)
-
-  if (!REDDIT_CLIENT_ID || !REDDIT_CLIENT_SECRET) {
-    return res.json({
-      ok: false,
-      posts: [],
-      error: 'Reddit OAuth not configured. Add REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET to .env (get from reddit.com/prefs/apps)',
-    })
-  }
-
+// Public Reddit JSON search — no OAuth app/credentials required.
+async function fetchRedditPublicPosts(ticker, limit) {
+  const query = encodeURIComponent(`${ticker} stock`)
+  const url   = `https://www.reddit.com/search.json?q=${query}&sort=new&limit=${limit}&t=week&type=link`
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 12000)
   try {
-    const token = await getRedditToken()
-    if (!token) return res.json({ ok: false, posts: [], error: 'Failed to obtain Reddit access token' })
-
-    const query = encodeURIComponent(`${ticker} stock`)
-    const url   = `https://oauth.reddit.com/search.json?q=${query}&sort=relevance&limit=${limit}&t=week&type=link`
-
     const resp = await fetch(url, {
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'User-Agent': REDDIT_USER_AGENT,
-      },
+      headers: { 'User-Agent': REDDIT_USER_AGENT },
+      signal: controller.signal,
     })
-
-    if (!resp.ok) {
-      return res.json({ ok: false, posts: [], error: `Reddit API error ${resp.status}` })
-    }
-
-    const data  = await resp.json()
-    const posts = (data?.data?.children ?? []).map(c => ({
+    if (!resp.ok) throw new Error(`Reddit API error ${resp.status}`)
+    const data = await resp.json()
+    return (data?.data?.children ?? []).map(c => ({
       id:           c.data.id,
       title:        c.data.title,
       subreddit:    c.data.subreddit,
@@ -6045,8 +6086,48 @@ app.get('/api/reddit/posts/:ticker', async (req, res) => {
       preview:      (c.data.selftext || '').slice(0, 180).trim() || null,
       created_utc:  c.data.created_utc,
     }))
+  } finally {
+    clearTimeout(timer)
+  }
+}
 
-    return res.json({ ok: true, ticker, posts })
+app.get('/api/reddit/posts/:ticker', async (req, res) => {
+  const ticker = (req.params.ticker || '').toUpperCase().trim()
+  if (!ticker) return res.status(400).json({ ok: false, posts: [], error: 'ticker required' })
+
+  const limit = Math.min(Number(req.query.limit) || 10, 25)
+
+  try {
+    // Prefer OAuth (higher rate limit) when credentials are present, else fall back
+    // to Reddit's public JSON search endpoint, which needs no app/credentials at all.
+    if (REDDIT_CLIENT_ID && REDDIT_CLIENT_SECRET) {
+      const token = await getRedditToken()
+      if (token) {
+        const query = encodeURIComponent(`${ticker} stock`)
+        const url   = `https://oauth.reddit.com/search.json?q=${query}&sort=relevance&limit=${limit}&t=week&type=link`
+        const resp  = await fetch(url, {
+          headers: { 'Authorization': `Bearer ${token}`, 'User-Agent': REDDIT_USER_AGENT },
+        })
+        if (resp.ok) {
+          const data  = await resp.json()
+          const posts = (data?.data?.children ?? []).map(c => ({
+            id:           c.data.id,
+            title:        c.data.title,
+            subreddit:    c.data.subreddit,
+            author:       c.data.author,
+            score:        c.data.score,
+            num_comments: c.data.num_comments,
+            url:          `https://www.reddit.com${c.data.permalink}`,
+            preview:      (c.data.selftext || '').slice(0, 180).trim() || null,
+            created_utc:  c.data.created_utc,
+          }))
+          return res.json({ ok: true, ticker, posts, source: 'oauth' })
+        }
+      }
+    }
+
+    const posts = await fetchRedditPublicPosts(ticker, limit)
+    return res.json({ ok: true, ticker, posts, source: 'public' })
   } catch (e) {
     return res.json({ ok: false, posts: [], error: String(e.message || e) })
   }
