@@ -2968,7 +2968,11 @@ async function fetchStockTwitsForTicker(db, ticker) {
   }
 }
 
-const REDDIT_BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+const REDDIT_RSS_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36 FlashFeed/1.0',
+  'Accept': 'application/xml,application/atom+xml,text/html,application/xhtml+xml,*/*;q=0.8',
+  'Accept-Language': 'en-US,en;q=0.9',
+}
 
 function parseRedditAtomXml(xml) {
   const entries = []
@@ -2998,20 +3002,25 @@ function parseRedditAtomXml(xml) {
 
 async function fetchRedditRss(ticker, limit = 25) {
   const query = encodeURIComponent(`${ticker} stock`)
-  const url = `https://www.reddit.com/search.rss?q=${query}&sort=new&t=day&limit=${limit}`
+  const url = `https://www.reddit.com/search.rss?q=${query}&sort=new&t=week&limit=${limit}`
   const ctrl = new AbortController()
   const tmo = setTimeout(() => ctrl.abort(), 12000)
   try {
     const resp = await fetch(url, {
-      headers: { 'User-Agent': REDDIT_BROWSER_UA },
+      headers: REDDIT_RSS_HEADERS,
       signal: ctrl.signal,
     })
     clearTimeout(tmo)
-    if (!resp.ok) return []
+    if (!resp.ok) { console.warn(`[reddit] RSS ${resp.status} for ${ticker}`); return [] }
     const xml = await resp.text()
-    return parseRedditAtomXml(xml)
+    const isHtml = xml.trimStart().startsWith('<!')
+    if (isHtml) { console.warn(`[reddit] RSS returned HTML for ${ticker} — IP may be blocked`); return [] }
+    const entries = parseRedditAtomXml(xml)
+    console.log(`[reddit] RSS ${ticker}: ${entries.length} entries`)
+    return entries
   } catch (e) {
     clearTimeout(tmo)
+    console.warn(`[reddit] RSS fetch error for ${ticker}:`, e.message)
     return []
   }
 }
