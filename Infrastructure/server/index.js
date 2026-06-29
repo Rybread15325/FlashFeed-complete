@@ -2887,20 +2887,18 @@ async function fetchYahooCandles(ticker, range, interval) {
   const days = rangeMs[yahooRange] ?? 90
   const period1 = new Date(now.getTime() - days * 86400 * 1000)
 
-  const result = await yahooFinance.chart(ticker, {
+  const quotes = await yahooFinance.historical(ticker, {
     period1,
     period2: now,
-    interval: yahooInterval,
-    includePrePost: true,
+    interval: yahooInterval === '1d' ? '1d' : yahooInterval === '1wk' ? '1wk' : '1d',
   }, { validateResult: false })
 
-  const quotes = result?.quotes ?? []
   const candles = []
-  for (const q of quotes) {
+  for (const q of (quotes ?? [])) {
     const open  = Number(q.open)
     const high  = Number(q.high)
     const low   = Number(q.low)
-    const close = Number(q.close ?? q.adjclose)
+    const close = Number(q.adjClose ?? q.close)
     if (![open, high, low, close].every(Number.isFinite)) continue
     if (open <= 0 || high <= 0 || low <= 0 || close <= 0) continue
     const time = q.date instanceof Date ? Math.floor(q.date.getTime() / 1000) : Number(q.date)
