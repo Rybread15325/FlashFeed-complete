@@ -1145,6 +1145,8 @@ function normalizeScreenerDoc(doc = {}) {
     quote_time: doc.quote_time || null,
     quote_updated_at: doc.quote_updated_at || null,
     quote_status: doc.quote_status || (hasStoredPrice ? "priced" : "missing"),
+    high_52w: nullableNumber(doc.high_52w ?? doc['52W High'] ?? doc['52w_high'] ?? doc.week52High ?? doc.fiftyTwoWeekHigh),
+    low_52w:  nullableNumber(doc.low_52w  ?? doc['52W Low']  ?? doc['52w_low']  ?? doc.week52Low  ?? doc.fiftyTwoWeekLow),
   }
 }
 
@@ -2913,10 +2915,13 @@ async function getYahooCrumb() {
 async function fetchStockTwitsForTicker(db, ticker) {
   try {
     const url = `https://api.stocktwits.com/api/2/streams/symbol/${encodeURIComponent(ticker)}.json?limit=30`
+    const ctrl = new AbortController()
+    const tmo = setTimeout(() => ctrl.abort(), 12000)
     const resp = await fetch(url, {
       headers: { 'User-Agent': 'Mozilla/5.0 FlashFeed/1.0' },
-      signal: AbortSignal.timeout(12000),
+      signal: ctrl.signal,
     })
+    clearTimeout(tmo)
     if (!resp.ok) return 0
     const json = await resp.json()
     const messages = Array.isArray(json.messages) ? json.messages : []
@@ -2961,6 +2966,77 @@ async function fetchStockTwitsForTicker(db, ticker) {
     console.warn('[stocktwits] fetch failed for', ticker, err.message)
     return 0
   }
+}
+
+async function computeArticleSentimentSeries(db, ticker, windowMinutes, bucketMinutes) {
+  const sinceSec = Math.floor(Date.now() / 1000) - windowMinutes * 60
+  const bucketSec = bucketMinutes * 60
+  const rows = await db.collection('articles').aggregate([
+    {
+      $match: {
+        $and: [
+          { ticker: { $regex: ticker, $options: 'i' } },
+          {
+            $or: [
+              { detected_at: { $gte: sinceSec } },
+              { publish_date: { $gte: new Date(sinceSec * 1000) } },
+            ],
+          },
+        ],
+      },
+    },
+    {
+      $addFields: {
+        _event_sec: {
+          $cond: {
+            if: { $in: [{ $type: '$detected_at' }, ['int', 'long', 'double', 'decimal']] },
+            then: '$detected_at',
+            else: {
+              $cond: {
+                if: { $eq: [{ $type: '$publish_date' }, 'date'] },
+                then: { $divide: [{ $toLong: '$publish_date' }, 1000] },
+                else: 0,
+              },
+            },
+          },
+        },
+        _score: {
+          $switch: {
+            branches: [
+              { case: { $in: [{ $type: '$sentiment_score' }, ['int', 'long', 'double', 'decimal']] }, then: { $toDouble: '$sentiment_score' } },
+              { case: { $regexMatch: { input: { $toLower: { $toString: { $ifNull: ['$sentiment', ''] } } }, regex: 'bull|positive' } }, then: 1 },
+              { case: { $regexMatch: { input: { $toLower: { $toString: { $ifNull: ['$sentiment', ''] } } }, regex: 'bear|negative' } }, then: -1 },
+            ],
+            default: 0,
+          },
+        },
+      },
+    },
+    { $match: { _event_sec: { $gte: sinceSec } } },
+    {
+      $addFields: {
+        _bucket_sec: { $multiply: [{ $floor: { $divide: ['$_event_sec', bucketSec] } }, bucketSec] },
+      },
+    },
+    {
+      $group: {
+        _id: '$_bucket_sec',
+        message_count: { $sum: 1 },
+        sentiment: { $avg: '$_score' },
+      },
+    },
+    { $sort: { _id: 1 } },
+  ]).toArray()
+
+  return addSessionScaledSocialFields(rows.map(row => ({
+    time: Number(row._id || 0),
+    bucket_sec: Number(row._id || 0),
+    session: marketSessionForSec(row._id),
+    message_count: Number(row.message_count || 0),
+    message_density: Number((Number(row.message_count || 0) / bucketMinutes).toFixed(3)),
+    sentiment: Number(Number(row.sentiment || 0).toFixed(3)),
+    platforms: ['news'],
+  })), bucketMinutes)
 }
 
 async function fetchYahooCandles(ticker, range, interval) {
@@ -3332,6 +3408,10 @@ app.get("/api/charts/:ticker", async (req, res) => {
     if (socialRows.length === 0) {
       await fetchStockTwitsForTicker(db, ticker)
       socialRows = await chartSocialSeries(db, ticker, socialWindow, socialBucket)
+    }
+    // If still no social data, fall back to article-based sentiment series
+    if (socialRows.length === 0) {
+      socialRows = await computeArticleSentimentSeries(db, ticker, socialWindow, socialBucket).catch(() => [])
     }
     const candles = candleResult.candles
     const chartEvents = [...newsEvents, ...chartSocialEvents(socialRows), ...predictionEvents].sort((a, b) => Number(a.time || 0) - Number(b.time || 0))

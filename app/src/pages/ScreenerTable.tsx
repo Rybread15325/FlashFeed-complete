@@ -70,6 +70,19 @@ const COLUMNS: Record<ViewMode, Array<{ key: string; label: string; sortable?: b
     { key: 'bullish_count', label: 'Bull', sortable: true },
     { key: 'bearish_count', label: 'Bear', sortable: true },
   ],
+  fundamentals: [
+    { key: 'no', label: 'No.' },
+    { key: 'ticker', label: 'Ticker', sortable: true },
+    { key: 'company', label: 'Company' },
+    { key: 'market_cap', label: 'Mkt Cap', sortable: true },
+    { key: 'pe_ratio', label: 'P/E', sortable: true },
+    { key: 'beta', label: 'Beta', sortable: true },
+    { key: 'target_price', label: 'Target', sortable: true },
+    { key: 'analyst', label: 'Analyst', sortable: true },
+    { key: 'earnings_date', label: 'Earnings', sortable: true },
+    { key: 'float_short', label: 'Short %', sortable: true },
+    { key: 'dividend_yield', label: 'Div %', sortable: true },
+  ],
 }
 
 export function ScreenerTable({ rows, isLoading, viewMode, pageOffset = 0, onSort, sortKey, sortDir, pinnedTickers, onPin }: Props) {

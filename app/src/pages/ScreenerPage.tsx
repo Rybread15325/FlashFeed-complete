@@ -9,10 +9,10 @@ import type { Article, ScreenerRow } from '@/lib/types'
 
 const fetcher = (url: string) => fetch(url).then(r => r.json())
 
-export type ViewMode = 'overview' | 'performance' | 'technical' | 'sentiment'
+export type ViewMode = 'overview' | 'performance' | 'technical' | 'sentiment' | 'fundamentals'
 type FilterTab = 'descriptive' | 'technical' | 'performance' | 'sentiment' | 'all'
 
-const VIEW_MODES: ViewMode[] = ['overview', 'performance', 'technical', 'sentiment']
+const VIEW_MODES: ViewMode[] = ['overview', 'performance', 'technical', 'sentiment', 'fundamentals']
 const PRESETS = [
   { key: '', label: 'All' },
   { key: 'top_gainers', label: 'Top Gainers' },
