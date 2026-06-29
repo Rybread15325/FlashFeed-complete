@@ -239,22 +239,6 @@ export function TopBar() {
             {fetching ? 'Fetching...' : cooldownRemaining > 0 ? `Fetch ${cooldownRemaining}s` : 'Run Now'}
           </button>
 
-          {/* Language selector — triggers Google Translate full-page translation */}
-          <select
-            value={language}
-            onChange={e => {
-              const code = e.target.value
-              setLanguage(code)
-              ;(window as any).flashfeedTranslateTo?.(code)
-            }}
-            className="hidden md:block bg-bg border border-border text-xs text-neutral rounded px-2 py-1.5 focus:outline-none focus:border-accent"
-            title="Translate entire page"
-          >
-            {LANGUAGES.map(l => (
-              <option key={l.code} value={l.code}>{l.flag} {l.nativeLabel}</option>
-            ))}
-          </select>
-
           <button
             onClick={saveToDisk}
             disabled={diskSaving}
@@ -299,6 +283,22 @@ export function TopBar() {
               {watching ? 'Stop' : 'Auto'}
             </button>
           </div>
+
+          {/* Language selector — triggers Google Translate full-page translation */}
+          <select
+            value={language}
+            onChange={e => {
+              const code = e.target.value
+              setLanguage(code)
+              ;(window as any).flashfeedTranslateTo?.(code)
+            }}
+            className="hidden md:block bg-bg border border-border text-xs text-neutral rounded px-2 py-1.5 focus:outline-none focus:border-accent"
+            title="Translate entire page"
+          >
+            {LANGUAGES.map(l => (
+              <option key={l.code} value={l.code}>{l.flag} {l.nativeLabel}</option>
+            ))}
+          </select>
 
           <button
             onClick={() => setShowSentiment(true)}
