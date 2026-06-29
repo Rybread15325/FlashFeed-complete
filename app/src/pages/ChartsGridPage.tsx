@@ -23,10 +23,10 @@ const REFRESH_OPTS: Array<{ key: string; label: string; ms: number }> = [
   { key: '1min', label: '1 min', ms: 60_000 },
 ]
 
-const PAGE_SIZE = 12
+const PAGE_SIZE = 9
 
 function Sparkline({ ticker, interval }: { ticker: string; range: string; interval: string }) {
-  return <TradingViewChart ticker={ticker} interval={interval} height={100} hideToolbar />
+  return <TradingViewChart ticker={ticker} interval={interval} height={220} hideToolbar />
 }
 
 function GridCell({
@@ -59,7 +59,7 @@ function GridCell({
       </div>
 
       {/* Sparkline */}
-      <div className="flex-1 min-h-[100px]">
+      <div className="flex-1 min-h-[220px]">
         <Sparkline ticker={row.ticker} range={range} interval={interval} />
       </div>
 
@@ -168,7 +168,7 @@ export function ChartsGridPage() {
           No tickers match current screener filters
         </div>
       ) : (
-        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-4 xl:grid-cols-6 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           {pageRows.map(row => (
             <GridCell
               key={`${row.ticker}-${nonce}`}

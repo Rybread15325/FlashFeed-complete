@@ -5023,13 +5023,14 @@ async function runDataRefreshCycle(db, { socialMode = "top_momentum", mode = "fa
   const fastMode = refreshMode !== "full"
   const beforeArticles = await db.collection("articles").countDocuments()
   const beforeSocial = await db.collection("socials").countDocuments()
+  const socialMomentumLimit = Number(process.env.SOCIAL_MOMENTUM_LIMIT || (fastMode ? 20 : 50))
   const socialExtraEnv = {
     SOCIAL_TICKER_SOURCE: "momentum",
-    SOCIAL_MOMENTUM_LIMIT: process.env.SOCIAL_MOMENTUM_LIMIT || "10",
-    SOCIAL_MAX_TICKERS: process.env.SOCIAL_MAX_TICKERS || "10",
+    SOCIAL_MOMENTUM_LIMIT: String(socialMomentumLimit),
+    SOCIAL_MAX_TICKERS: process.env.SOCIAL_MAX_TICKERS || String(socialMomentumLimit),
     SOCIAL_MAX_WORKERS: process.env.SOCIAL_MAX_WORKERS || "8",
     SOCIAL_REDDIT_TIMEOUT: process.env.SOCIAL_REDDIT_TIMEOUT || "4",
-    SOCIAL_REDDIT_PUBLIC_FALLBACK: process.env.SOCIAL_REDDIT_PUBLIC_FALLBACK || "false",
+    SOCIAL_REDDIT_PUBLIC_FALLBACK: process.env.SOCIAL_REDDIT_PUBLIC_FALLBACK || "true",
   }
 
   const [finvizElite, tradingViewScreener] = await Promise.all([
@@ -5052,7 +5053,7 @@ async function runDataRefreshCycle(db, { socialMode = "top_momentum", mode = "fa
   let socialTickers = []
   let publicSocialTickers = []
   if (socialMode === "top_momentum") {
-    publicSocialTickers = await loadTopMomentumTickerSymbols(db, Number(process.env.SOCIAL_MOMENTUM_LIMIT || (fastMode ? 12 : 10)))
+    publicSocialTickers = await loadTopMomentumTickerSymbols(db, socialMomentumLimit)
     socialTickers = withPrivateSocialTickers(publicSocialTickers)
     if (socialTickers.length) {
       socialExtraEnv.SOCIAL_TICKERS = socialTickers.join(",")
