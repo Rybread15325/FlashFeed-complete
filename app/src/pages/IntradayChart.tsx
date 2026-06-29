@@ -1,6 +1,7 @@
 'use client'
 import useSWR from 'swr'
 import { CandlestickChart } from './CandlestickChart'
+import { TradingViewChart } from '@/components/charts/TradingViewChart'
 
 const fetcher = (url: string) => fetch(url).then(r => r.json())
 
@@ -14,7 +15,7 @@ export function IntradayChart({ ticker }: Props) {
   }
 
   if (!data?.candles?.length) {
-    return <div className="w-full h-full flex items-center justify-center text-[10px] text-neutral">No chart data</div>
+    return <TradingViewChart ticker={ticker} interval="5m" height={140} hideToolbar />
   }
 
   return (

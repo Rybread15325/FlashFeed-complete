@@ -148,14 +148,18 @@ export function ChartsPage() {
         <>
           {view === 'candles' && (
             <div className="space-y-3">
-              <div className="grid grid-cols-2 md:grid-cols-6 gap-2">
-                <Status label="Price"       value={data.source_status?.price ?? 'unknown'} />
-                <Status label="Source"      value={data.source_status?.price_source ?? 'pending'} />
-                <Status label="Social"      value={data.source_status?.social ?? 'pending'} />
-                <Status label="News Markers" value={String(data.news_events?.length ?? 0)} />
-                <Status label="Predictions" value={String(data.prediction_events?.length ?? 0)} />
-                <Status label="Bars"        value={String(data.candles?.length ?? 0)} />
-              </div>
+              {data.candles?.length ? (
+                <div className="grid grid-cols-2 md:grid-cols-6 gap-2">
+                  <Status label="Price"       value={data.source_status?.price ?? 'ok'} />
+                  <Status label="Source"      value={data.source_status?.price_source ?? 'market'} />
+                  <Status label="Social"      value={data.source_status?.social === 'no_social_posts' ? '0 posts' : (data.source_status?.social ?? 'pending')} />
+                  <Status label="News Markers" value={String(data.news_events?.length ?? 0)} />
+                  <Status label="Predictions" value={String(data.prediction_events?.length ?? 0)} />
+                  <Status label="Bars"        value={String(data.candles?.length ?? 0)} />
+                </div>
+              ) : (
+                <div className="text-[10px] text-slate-500 px-1">Live chart via TradingView · social &amp; prediction overlays require a data fetch</div>
+              )}
 
               <ChartCard title={`${INT_LABELS[interval] ?? interval} Price + Bollinger Bands`} height={300}>
                 {data.candles?.length

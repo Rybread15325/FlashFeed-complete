@@ -239,12 +239,16 @@ export function TopBar() {
             {fetching ? 'Fetching...' : cooldownRemaining > 0 ? `Fetch ${cooldownRemaining}s` : 'Run Now'}
           </button>
 
-          {/* Language selector */}
+          {/* Language selector — triggers Google Translate full-page translation */}
           <select
             value={language}
-            onChange={e => setLanguage(e.target.value)}
+            onChange={e => {
+              const code = e.target.value
+              setLanguage(code)
+              ;(window as any).flashfeedTranslateTo?.(code)
+            }}
             className="hidden md:block bg-bg border border-border text-xs text-neutral rounded px-2 py-1.5 focus:outline-none focus:border-accent"
-            title="UI language for article translation"
+            title="Translate entire page"
           >
             {LANGUAGES.map(l => (
               <option key={l.code} value={l.code}>{l.flag} {l.nativeLabel}</option>

@@ -30,7 +30,7 @@ const tabs = [
   { id: 'all', label: 'All' },
   { id: 'reddit', label: 'Reddit' },
   { id: 'bluesky', label: 'Bluesky' },
-  { id: 'twitter', label: 'Twitter' },
+  { id: 'twitter', label: '𝕏' },
   { id: 'stocktwits', label: 'StockTwits' },
 ]
 

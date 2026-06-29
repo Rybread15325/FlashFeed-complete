@@ -489,7 +489,7 @@ function TickerMirrorContent({ ticker, row, onClose }: { ticker: string; row: SR
                   ? `News${newsCount > 0 ? ` (${newsCount})` : ''}${isWebFallback ? ' · web' : ''}`
                   : tab === 'reddit'
                   ? 'Reddit'
-                  : '𝕏 Twitter'}
+                  : '𝕏'}
               </button>
             ))}
           </div>

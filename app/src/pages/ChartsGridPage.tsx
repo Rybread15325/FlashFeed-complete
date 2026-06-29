@@ -3,6 +3,7 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import useSWR from 'swr'
 import { readView, applyScreenerView } from '@/lib/screenerView'
 import type { ScreenerRow } from '@/lib/types'
+import { TradingViewChart } from '@/components/charts/TradingViewChart'
 
 const fetcher = (url: string) => fetch(url).then(r => r.json())
 
@@ -24,52 +25,8 @@ const REFRESH_OPTS: Array<{ key: string; label: string; ms: number }> = [
 
 const PAGE_SIZE = 12
 
-function Sparkline({ ticker, range, interval }: { ticker: string; range: string; interval: string }) {
-  const { data, isLoading } = useSWR(
-    `/api/charts/${ticker}?range=${range}&interval=${interval}`,
-    fetcher,
-    { revalidateOnFocus: false }
-  )
-
-  if (isLoading) {
-    return (
-      <div className="flex items-center justify-center h-full">
-        <div className="text-[10px] text-slate-600 animate-pulse">Loading…</div>
-      </div>
-    )
-  }
-
-  const candles: Array<{ close: number }> = data?.candles ?? []
-  if (candles.length < 2) {
-    return (
-      <div className="flex items-center justify-center h-full">
-        <div className="text-[10px] text-slate-600">No data</div>
-      </div>
-    )
-  }
-
-  const closes = candles.map(c => c.close)
-  const min = Math.min(...closes)
-  const max = Math.max(...closes)
-  const range2 = max - min || 1
-  const w = 200
-  const h = 60
-  const points = closes.map((c, i) => {
-    const x = (i / (closes.length - 1)) * w
-    const y = h - ((c - min) / range2) * h
-    return `${x},${y}`
-  }).join(' ')
-
-  const first = closes[0]
-  const last = closes[closes.length - 1]
-  const up = last >= first
-  const stroke = up ? '#10b981' : '#ef4444'
-
-  return (
-    <svg viewBox={`0 0 ${w} ${h}`} className="w-full h-full" preserveAspectRatio="none">
-      <polyline points={points} fill="none" stroke={stroke} strokeWidth="1.5" strokeLinejoin="round" />
-    </svg>
-  )
+function Sparkline({ ticker, interval }: { ticker: string; range: string; interval: string }) {
+  return <TradingViewChart ticker={ticker} interval={interval} height={100} hideToolbar />
 }
 
 function GridCell({
@@ -102,7 +59,7 @@ function GridCell({
       </div>
 
       {/* Sparkline */}
-      <div className="flex-1 min-h-[64px] p-1">
+      <div className="flex-1 min-h-[100px]">
         <Sparkline ticker={row.ticker} range={range} interval={interval} />
       </div>
 
