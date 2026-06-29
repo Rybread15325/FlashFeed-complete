@@ -4,18 +4,20 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>FlashFeed</title>
-    <!-- Google Translate: hidden widget used for full-page translation -->
     <style>
-      /* Hide the Google Translate widget div itself (we trigger it programmatically) */
-      #google_translate_element { display: none !important; visibility: hidden !important; }
-      .goog-te-gadget { display: none !important; }
-      /* When Google Translate is active it sets body { top: -40px } which hides top content.
-         Counter that by pushing the body down the same amount so the bar sits above the page. */
-      html.translated-ltr body,
-      html.translated-rtl body {
-        top: 0 !important;
-        margin-top: 40px !important;
+      /* Move GT element off-screen so widget initialises but shows no UI */
+      #google_translate_element {
+        position: absolute;
+        left: -9999px;
+        top: -9999px;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
       }
+      /* Suppress the "Translated to …" header banner Google injects */
+      .goog-te-banner-frame { display: none !important; }
+      /* Google sets body{top:-40px} when the banner exists — reset it */
+      body { top: 0 !important; }
     </style>
   </head>
   <body>
@@ -30,24 +32,37 @@
           multilanguagePage: false
         }, 'google_translate_element');
       };
+
       window.flashfeedTranslateTo = function(langCode) {
-        if (!langCode || langCode === 'en') {
-          document.cookie = 'googtrans=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/';
-          document.cookie = 'googtrans=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/; domain=' + window.location.hostname;
-          var combo = document.querySelector('.goog-te-combo');
-          if (combo) { combo.value = ''; combo.dispatchEvent(new Event('change')); }
-          else { window.location.reload(); }
+        var map = { zh: 'zh-CN', bn: 'bn' };
+        var gl = langCode && langCode !== 'en' ? (map[langCode] || langCode) : '';
+
+        /* Clear old cookie first */
+        document.cookie = 'googtrans=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/';
+        document.cookie = 'googtrans=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/; domain=' + window.location.hostname;
+
+        if (!gl) {
+          /* Back to English — reload without cookie so GT removes itself */
+          window.location.reload();
           return;
         }
-        var map = { zh: 'zh-CN', bn: 'bn' };
-        var gl = map[langCode] || langCode;
+
+        /* Set cookie then fire the combo-box change so GT translates in-place */
         document.cookie = 'googtrans=/en/' + gl + '; path=/';
         document.cookie = 'googtrans=/en/' + gl + '; path=/; domain=' + window.location.hostname;
+
         var combo = document.querySelector('.goog-te-combo');
-        if (combo) { combo.value = gl; combo.dispatchEvent(new Event('change')); }
-        else { window.location.reload(); }
+        if (combo) {
+          combo.value = gl;
+          combo.dispatchEvent(new Event('change'));
+        } else {
+          /* Widget not ready yet — reload so the cookie is picked up on init */
+          window.location.reload();
+        }
       };
     </script>
-    <script type="text/javascript" src="//translate.google.com/translate_a/element.js?cb=googleTranslateElementInit" async></script>
+    <script type="text/javascript"
+      src="//translate.google.com/translate_a/element.js?cb=googleTranslateElementInit"
+      async></script>
   </body>
 </html>
