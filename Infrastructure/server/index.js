@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url'
 import { connectDB } from './db.js'
 import Redis from 'ioredis'
 import cron from 'node-cron'
+import yahooFinance from 'yahoo-finance2'
 
 import articlesRouter    from './routes/articles.js'
 import screenerRouter    from './routes/screener.js'
@@ -2876,40 +2877,40 @@ function yahooIntervalFor(interval) {
 async function fetchYahooCandles(ticker, range, interval) {
   const yahooRange = yahooRangeFor(range, interval)
   const yahooInterval = yahooIntervalFor(interval)
-  const url = new URL(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}`)
-  url.searchParams.set("range", yahooRange)
-  url.searchParams.set("interval", yahooInterval)
-  url.searchParams.set("includePrePost", "true")
-  url.searchParams.set("events", "history")
 
-  const resp = await fetch(url, {
-    headers: {
-      "User-Agent": "FeedFlashStockDashboard/0.1",
-      "Accept": "application/json",
-    },
-  })
-  if (!resp.ok) throw new Error(`chart provider HTTP ${resp.status}`)
-  const payload = await resp.json()
-  const result = payload?.chart?.result?.[0]
-  const timestamps = result?.timestamp || []
-  const quote = result?.indicators?.quote?.[0] || {}
+  // Map range string to period1 date
+  const now = new Date()
+  const rangeMs = {
+    '1d':  1,  '5d':  5,  '1mo': 30, '3mo': 90,
+    '6mo': 180,'1y':  365,'2y':  730,'5y':  1825,
+  }
+  const days = rangeMs[yahooRange] ?? 90
+  const period1 = new Date(now.getTime() - days * 86400 * 1000)
+
+  const result = await yahooFinance.chart(ticker, {
+    period1,
+    period2: now,
+    interval: yahooInterval,
+    includePrePost: true,
+  }, { validateResult: false })
+
+  const quotes = result?.quotes ?? []
   const candles = []
-
-  for (let i = 0; i < timestamps.length; i += 1) {
-    const open = Number(quote.open?.[i])
-    const high = Number(quote.high?.[i])
-    const low = Number(quote.low?.[i])
-    const close = Number(quote.close?.[i])
+  for (const q of quotes) {
+    const open  = Number(q.open)
+    const high  = Number(q.high)
+    const low   = Number(q.low)
+    const close = Number(q.close ?? q.adjclose)
     if (![open, high, low, close].every(Number.isFinite)) continue
     if (open <= 0 || high <= 0 || low <= 0 || close <= 0) continue
-    if (high < Math.max(open, close, low) || low > Math.min(open, close, high)) continue
+    const time = q.date instanceof Date ? Math.floor(q.date.getTime() / 1000) : Number(q.date)
     candles.push({
-      time: Number(timestamps[i]),
-      open: Number(open.toFixed(4)),
-      high: Number(high.toFixed(4)),
-      low: Number(low.toFixed(4)),
-      close: Number(close.toFixed(4)),
-      volume: Number.isFinite(Number(quote.volume?.[i])) ? Number(quote.volume[i]) : 0,
+      time,
+      open:   Number(open.toFixed(4)),
+      high:   Number(high.toFixed(4)),
+      low:    Number(low.toFixed(4)),
+      close:  Number(close.toFixed(4)),
+      volume: Number.isFinite(Number(q.volume)) ? Number(q.volume) : 0,
     })
   }
   return { candles, provider_range: yahooRange, provider_interval: yahooInterval }
