@@ -33,6 +33,7 @@ export function TopBar() {
   const { data: status, mutate: mutateStatus } = useSWR('/api/status', fetcher, { refreshInterval: 30_000 })
   const { data: stats } = useSWR('/api/stats?days=0', fetcher, { refreshInterval: 30_000 })
   const { data: marketStatus } = useSWR('/api/market/status', fetcher, { refreshInterval: 60_000 })
+  const { data: kafkaStatus } = useSWR('/api/kafka/status', fetcher, { refreshInterval: 60_000 })
 
   const [fetching, setFetching] = useState(false)
   const [fetchResult, setFetchResult] = useState<{ new_articles?: number; updated_articles?: number; refreshed_articles?: number; unchanged_articles?: number; total_articles?: number; ms?: number } | null>(null)
@@ -238,6 +239,25 @@ export function TopBar() {
           >
             {fetching ? 'Fetching...' : cooldownRemaining > 0 ? `Fetch ${cooldownRemaining}s` : 'Run Now'}
           </button>
+
+          {/* Kafka stream indicator — sits between RAM fetch and disk save */}
+          <div
+            title={kafkaStatus?.configured
+              ? `Kafka stream active · topic: ${kafkaStatus.topic} · ${kafkaStatus.events_last_hour ?? 0} events/hr`
+              : 'Kafka not configured — add KAFKA_BOOTSTRAP_SERVERS in Railway env vars (free broker at upstash.com/kafka)'}
+            className={`hidden md:flex items-center gap-1.5 px-3 py-1.5 border text-xs font-medium rounded transition-colors whitespace-nowrap select-none ${
+              kafkaStatus?.configured
+                ? 'bg-emerald-500/10 border-emerald-500/40 text-emerald-400'
+                : 'bg-surface border-border text-slate-600'
+            }`}
+          >
+            <svg className="w-3 h-3 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M22 12h-4l-3 9L9 3l-3 9H2"/>
+            </svg>
+            {kafkaStatus?.configured
+              ? `Kafka · ${kafkaStatus.events_last_hour ?? 0}/hr`
+              : 'Kafka ✗'}
+          </div>
 
           <button
             onClick={saveToDisk}
