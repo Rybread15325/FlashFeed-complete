@@ -2968,44 +2968,79 @@ async function fetchStockTwitsForTicker(db, ticker) {
   }
 }
 
-async function fetchRedditForTicker(db, ticker) {
+const REDDIT_BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+
+function parseRedditAtomXml(xml) {
+  const entries = []
+  const entryRe = /<entry>([\s\S]*?)<\/entry>/g
+  const decode = s => s.replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/&#x27;/g,"'").replace(/&#39;/g,"'")
+  let m
+  while ((m = entryRe.exec(xml)) !== null) {
+    const e = m[1]
+    const title  = decode((/<title[^>]*>([\s\S]*?)<\/title>/.exec(e) || [])[1] || '').trim()
+    const link   = (/<link[^>]*href="([^"]*)"/.exec(e) || [])[1] || ''
+    const author = decode((/<name>([\s\S]*?)<\/name>/.exec(e) || [])[1] || '').replace('/u/', '')
+    const updated = (/<updated>([\s\S]*?)<\/updated>/.exec(e) || [])[1] || ''
+    const sub = (/<category[^>]*term="([^"]*)"/.exec(e) || [])[1] || ''
+    if (!title || !link || link.indexOf('/comments/') === -1) continue
+    const idMatch = /\/comments\/([a-z0-9]+)\//.exec(link)
+    entries.push({
+      id: idMatch ? idMatch[1] : link,
+      title,
+      link,
+      author,
+      subreddit: sub,
+      created_utc: updated ? Math.floor(new Date(updated).getTime() / 1000) : Math.floor(Date.now() / 1000),
+    })
+  }
+  return entries
+}
+
+async function fetchRedditRss(ticker, limit = 25) {
+  const query = encodeURIComponent(`${ticker} stock`)
+  const url = `https://www.reddit.com/search.rss?q=${query}&sort=new&t=day&limit=${limit}`
+  const ctrl = new AbortController()
+  const tmo = setTimeout(() => ctrl.abort(), 12000)
   try {
-    const query = encodeURIComponent(`${ticker} stock`)
-    const url = `https://www.reddit.com/search.json?q=${query}&sort=new&limit=25&t=week&type=link`
-    const ctrl = new AbortController()
-    const tmo = setTimeout(() => ctrl.abort(), 12000)
     const resp = await fetch(url, {
-      headers: { 'User-Agent': 'FlashFeed/1.0 (financial dashboard; contact via github.com/Rybread15325)' },
+      headers: { 'User-Agent': REDDIT_BROWSER_UA },
       signal: ctrl.signal,
     })
     clearTimeout(tmo)
-    if (!resp.ok) return 0
-    const json = await resp.json()
-    const children = Array.isArray(json?.data?.children) ? json.data.children : []
-    if (!children.length) return 0
+    if (!resp.ok) return []
+    const xml = await resp.text()
+    return parseRedditAtomXml(xml)
+  } catch (e) {
+    clearTimeout(tmo)
+    return []
+  }
+}
+
+async function fetchRedditForTicker(db, ticker) {
+  try {
+    const entries = await fetchRedditRss(ticker, 25)
+    if (!entries.length) return 0
 
     let inserted = 0
-    for (const c of children) {
-      const post = c.data
-      const redditId = String(post?.id || '')
+    for (const e of entries) {
+      const redditId = String(e.id || '')
       if (!redditId) continue
-      const createdSec = post.created_utc ? Math.floor(Number(post.created_utc)) : Math.floor(Date.now() / 1000)
-      const text = `${post.title || ''} ${post.selftext || ''}`.trim()
 
       const doc = {
         platform: 'reddit',
-        collector: 'node_reddit',
+        collector: 'node_reddit_rss',
         ticker,
         symbol: ticker,
-        text,
-        author: post.author || '',
+        text: e.title,
+        author: e.author || '',
         sentiment: 'Neutral',
         sentiment_score: 0,
-        url: `https://www.reddit.com${post.permalink || ''}`,
+        url: e.link,
+        subreddit: e.subreddit || '',
         fetched_at: Math.floor(Date.now() / 1000),
-        detected_at: createdSec,
-        timestamp: createdSec,
-        created_at: new Date(createdSec * 1000),
+        detected_at: e.created_utc,
+        timestamp: e.created_utc,
+        created_at: new Date(e.created_utc * 1000),
         source: 'reddit',
         _reddit_id: redditId,
       }
@@ -6063,35 +6098,6 @@ app.get('/api/reddit/status', async (req, res) => {
   })
 })
 
-// Public Reddit JSON search — no OAuth app/credentials required.
-async function fetchRedditPublicPosts(ticker, limit) {
-  const query = encodeURIComponent(`${ticker} stock`)
-  const url   = `https://www.reddit.com/search.json?q=${query}&sort=new&limit=${limit}&t=week&type=link`
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), 12000)
-  try {
-    const resp = await fetch(url, {
-      headers: { 'User-Agent': REDDIT_USER_AGENT },
-      signal: controller.signal,
-    })
-    if (!resp.ok) throw new Error(`Reddit API error ${resp.status}`)
-    const data = await resp.json()
-    return (data?.data?.children ?? []).map(c => ({
-      id:           c.data.id,
-      title:        c.data.title,
-      subreddit:    c.data.subreddit,
-      author:       c.data.author,
-      score:        c.data.score,
-      num_comments: c.data.num_comments,
-      url:          `https://www.reddit.com${c.data.permalink}`,
-      preview:      (c.data.selftext || '').slice(0, 180).trim() || null,
-      created_utc:  c.data.created_utc,
-    }))
-  } finally {
-    clearTimeout(timer)
-  }
-}
-
 app.get('/api/reddit/posts/:ticker', async (req, res) => {
   const ticker = (req.params.ticker || '').toUpperCase().trim()
   if (!ticker) return res.status(400).json({ ok: false, posts: [], error: 'ticker required' })
@@ -6099,8 +6105,7 @@ app.get('/api/reddit/posts/:ticker', async (req, res) => {
   const limit = Math.min(Number(req.query.limit) || 10, 25)
 
   try {
-    // Prefer OAuth (higher rate limit) when credentials are present, else fall back
-    // to Reddit's public JSON search endpoint, which needs no app/credentials at all.
+    // OAuth path: used when credentials are configured
     if (REDDIT_CLIENT_ID && REDDIT_CLIENT_SECRET) {
       const token = await getRedditToken()
       if (token) {
@@ -6127,8 +6132,20 @@ app.get('/api/reddit/posts/:ticker', async (req, res) => {
       }
     }
 
-    const posts = await fetchRedditPublicPosts(ticker, limit)
-    return res.json({ ok: true, ticker, posts, source: 'public' })
+    // No-credential fallback: Reddit public RSS (Atom) feed — no API key required
+    const entries = await fetchRedditRss(ticker, limit)
+    const posts = entries.map(e => ({
+      id:          e.id,
+      title:       e.title,
+      subreddit:   e.subreddit,
+      author:      e.author,
+      score:       null,
+      num_comments: null,
+      url:         e.link,
+      preview:     null,
+      created_utc: e.created_utc,
+    }))
+    return res.json({ ok: true, ticker, posts, source: 'rss' })
   } catch (e) {
     return res.json({ ok: false, posts: [], error: String(e.message || e) })
   }
