@@ -7,6 +7,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { connectDB } from './db.js'
 import Redis from 'ioredis'
+import cron from 'node-cron'
 
 import articlesRouter    from './routes/articles.js'
 import screenerRouter    from './routes/screener.js'
@@ -615,10 +616,31 @@ async function translateWithGoogle(text, targetLanguage) {
   return data?.data?.translations?.[0]?.translatedText || null
 }
 
+async function translateWithMyMemory(text, targetLanguage) {
+  if (targetLanguage === 'en') return null
+  const langMap = { zh: 'zh-CN', bn: 'bn-BD', hi: 'hi-IN' }
+  const lang = langMap[targetLanguage] || targetLanguage
+  const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=en|${lang}`
+  const res = await fetch(url, { signal: AbortSignal.timeout(5000) })
+  if (!res.ok) return null
+  const data = await res.json()
+  const translated = data?.responseData?.translatedText
+  if (!translated || translated === text) return null
+  // MyMemory returns error messages as translated text when quota exceeded
+  if (translated.toLowerCase().includes('mymemory') || translated.toLowerCase().includes('quota')) return null
+  return translated
+}
+
 async function translateWithProvider(text, targetLanguage) {
   // Try Google Translate first if key is set
   const googleResult = await translateWithGoogle(text, targetLanguage)
   if (googleResult) return googleResult
+
+  // Try MyMemory free API (500 chars/day free, no key needed)
+  try {
+    const myMemoryResult = await translateWithMyMemory(text, targetLanguage)
+    if (myMemoryResult) return myMemoryResult
+  } catch { /* ignore, fall through to glossary */ }
 
   // Fall back to custom translation provider URL
   const url = process.env.TRANSLATION_API_URL
@@ -5979,6 +6001,24 @@ app.listen(PORT, () => {
     console.log('  Docs    →  README-MONGODB.md')
     console.log()
   })
+
+  // Background auto-fetch every 20 minutes (server-side, no browser needed)
+  let cronRunning = false
+  cron.schedule('*/20 * * * *', async () => {
+    if (cronRunning) return
+    cronRunning = true
+    try {
+      const db = mongoose.connection.db
+      if (!db) return
+      const result = await runDataRefreshCycle(db, { socialMode: 'top_momentum', mode: 'fast' })
+      console.log(`[cron] auto-fetch: +${result.new_articles ?? 0} articles, +${result.social_new ?? 0} social, ${result.quotes_updated ?? 0} quotes`)
+    } catch (err) {
+      console.error('[cron] auto-fetch failed:', err.message)
+    } finally {
+      cronRunning = false
+    }
+  })
+  console.log('  Cron    →  auto-fetch every 20 min')
 
   // Auto-save snapshot when the server process exits
   const shutdown = async (signal) => {
