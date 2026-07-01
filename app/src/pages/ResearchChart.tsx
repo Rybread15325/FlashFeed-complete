@@ -120,7 +120,10 @@ function buildConfig(mode: ResearchMode, raw: FlashFeedChartData, win: WinKey, w
 
   Chart.defaults.color = '#4e5567'
   const baseOpts = {
-    responsive: true, maintainAspectRatio: false, animation: false as const,
+    responsive: true,
+    maintainAspectRatio: false,
+    animation: false as const,
+    devicePixelRatio: (typeof window !== 'undefined' ? window.devicePixelRatio : 1) || 2,
     interaction: { mode: 'index' as const, intersect: false },
   }
 
@@ -145,7 +148,7 @@ function buildConfig(mode: ResearchMode, raw: FlashFeedChartData, win: WinKey, w
           borderColor: '#2196F3', borderWidth: 1.4, tension: .1, pointRadius: 0,
           fill: { target: { value: pMin } }, backgroundColor: 'rgba(33,150,243,.08)' },
         { label: 'Messages/min', type: 'bar', data: dens, yAxisID: 'y2',
-          backgroundColor: 'rgba(144,202,249,.5)', borderWidth: 0, barPercentage: 1, categoryPercentage: 1 },
+          backgroundColor: 'rgba(144,202,249,.5)', borderWidth: 0, barPercentage: 0.5, categoryPercentage: 0.8 },
         { label: `${windowMin}-min avg density`, data: densSl, yAxisID: 'y2', spanGaps: true,
           borderColor: '#FF9800', borderWidth: 2, tension: .1, pointRadius: 0 },
       ] },
@@ -220,7 +223,7 @@ function buildConfig(mode: ResearchMode, raw: FlashFeedChartData, win: WinKey, w
     type: 'line',
     data: { labels, datasets: [
       { label: 'Messages/window', type: 'bar', data: dens, yAxisID: 'y1',
-        backgroundColor: 'rgba(33,150,243,.3)', borderWidth: 0, barPercentage: 1, categoryPercentage: 1 },
+        backgroundColor: 'rgba(33,150,243,.3)', borderWidth: 0, barPercentage: 0.5, categoryPercentage: 0.8 },
       { label: '15-min avg density', data: densSlm, yAxisID: 'y1', spanGaps: true,
         borderColor: '#2196F3', borderWidth: 1.8, tension: .1, pointRadius: 0 },
       { label: 'Sentiment score (smoothed)', data: sentSm, yAxisID: 'ys', spanGaps: true,
@@ -322,7 +325,7 @@ export function ResearchChart({ ticker, mode, data, win = 'full' }: Props) {
         </div>
       )}
 
-      <div className="flex-1 min-h-0 p-2">
+      <div className="flex-1 min-h-0 p-2" style={{ position: 'relative' }}>
         <canvas ref={canvasRef} />
       </div>
     </div>

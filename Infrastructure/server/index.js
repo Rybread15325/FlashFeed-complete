@@ -6250,7 +6250,7 @@ app.delete('/api/settings/keywords/:keyword', async (req, res) => {
 
 const DISK_TTL_KEY = 'disk_ttl_days'
 const DISK_ARCHIVE_COLLECTION = 'disk_archive'
-const DEFAULT_DISK_TTL_DAYS = 7
+const DEFAULT_DISK_TTL_DAYS = 3
 
 async function getDiskTtlDays() {
   try {
