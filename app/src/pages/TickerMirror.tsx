@@ -172,6 +172,7 @@ function TickerMirrorContent({ ticker, row, onClose }: { ticker: string; row: SR
   const [newsSubTab, setNewsSubTab] = useState<NewsSubTab>('news')
   const [grokText, setGrokText] = useState<string | null>(null)
   const [grokLoading, setGrokLoading] = useState(false)
+  const { data: aiStatus } = useSWR('/api/grok/status', fetcher, { revalidateOnFocus: false })
 
   const { range, interval, capLabel } = getChartParams((row as any).market_cap)
   const { data: chartData } = useSWR(`/api/charts/${ticker}?range=${range}&interval=${interval}`, fetcher)
@@ -289,9 +290,10 @@ function TickerMirrorContent({ ticker, row, onClose }: { ticker: string; row: SR
           <button
             onClick={runGrok}
             disabled={grokLoading}
+            title={aiStatus?.engine === 'grok' ? 'Analyze with Grok (xAI)' : aiStatus?.engine === 'claude' ? 'Analyze with Claude (Anthropic)' : 'AI analysis from local data — add GROK_API_KEY or ANTHROPIC_API_KEY in Railway for LLM analysis'}
             className="text-[11px] px-2 py-1 bg-violet-600/20 border border-violet-500/30 text-violet-300 rounded hover:bg-violet-600/30 disabled:opacity-50 transition-colors"
           >
-            {grokLoading ? 'Analyzing…' : '✦ Grok'}
+            {grokLoading ? 'Analyzing…' : aiStatus?.engine === 'grok' ? '✦ Grok' : aiStatus?.engine === 'claude' ? '✦ Claude' : '✦ AI'}
           </button>
           <button onClick={onClose} className="text-neutral hover:text-white text-xl leading-none w-6 h-6 flex items-center justify-center">×</button>
         </div>

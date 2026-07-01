@@ -6042,47 +6042,154 @@ app.patch('/api/disk/settings', async (req, res) => {
   }
 })
 
-// ── GROK (xAI) API PROXY ──────────────────────────────────────────────────────
+// ── AI ANALYSIS (Grok / Claude / local fallback) ─────────────────────────────
 
-const GROK_API_KEY = process.env.GROK_API_KEY || ''
-const GROK_BASE_URL = 'https://api.x.ai/v1'
-const GROK_MODEL = process.env.GROK_MODEL || 'grok-3'
+const GROK_API_KEY      = process.env.GROK_API_KEY      || ''
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || ''
+const GROK_BASE_URL     = 'https://api.x.ai/v1'
+const GROK_MODEL        = process.env.GROK_MODEL        || 'grok-3-mini'
+const CLAUDE_MODEL      = process.env.CLAUDE_MODEL      || 'claude-haiku-4-5-20251001'
+
+// Local rule-based analysis — always available, no API key required
+async function buildLocalAnalysis(db, ticker, context) {
+  let row = null
+  let articles = []
+  try {
+    if (db) {
+      const doc = await db.collection('screeners').findOne({ ticker })
+      if (doc) row = doc
+      const arts = await db.collection('articles')
+        .find({ ticker: { $regex: ticker, $options: 'i' } })
+        .sort({ publish_date: -1 })
+        .limit(5)
+        .toArray()
+      articles = arts
+    }
+  } catch { /* non-fatal */ }
+
+  const price      = row?.price != null       ? `$${Number(row.price).toFixed(2)}`  : null
+  const change     = row?.change_pct != null  ? `${Number(row.change_pct) >= 0 ? '+' : ''}${Number(row.change_pct).toFixed(2)}%` : null
+  const mktCap     = row?.market_cap != null  ? (Number(row.market_cap) >= 1e9 ? `${(Number(row.market_cap)/1e9).toFixed(1)}B` : `${(Number(row.market_cap)/1e6).toFixed(0)}M`) : null
+  const pe         = row?.pe_ratio != null    ? Number(row.pe_ratio).toFixed(1) : null
+  const rsi        = row?.rsi != null         ? Number(row.rsi).toFixed(1) : null
+  const sentiment  = row?.avg_sentiment != null ? Number(row.avg_sentiment) : null
+  const analyst    = row?.analyst             || null
+  const beta       = row?.beta != null        ? Number(row.beta).toFixed(2) : null
+
+  const lines = []
+
+  // Price & momentum
+  if (price && change) {
+    const dir = Number(row.change_pct) >= 0 ? 'up' : 'down'
+    lines.push(`${ticker} is trading at ${price}, ${dir} ${change} today.`)
+  }
+
+  // Technicals
+  if (rsi) {
+    const rsiN = Number(rsi)
+    const rsiNote = rsiN > 70 ? 'overbought territory' : rsiN < 30 ? 'oversold territory' : 'neutral technical range'
+    lines.push(`RSI is ${rsi} (${rsiNote}).`)
+  }
+
+  // Valuation
+  const valParts = []
+  if (mktCap) valParts.push(`market cap ${mktCap}`)
+  if (pe)     valParts.push(`P/E ${pe}`)
+  if (beta)   valParts.push(`beta ${beta}`)
+  if (valParts.length) lines.push(`Valuation: ${valParts.join(', ')}.`)
+
+  // Analyst
+  if (analyst) lines.push(`Analyst consensus: ${analyst}.`)
+
+  // News sentiment
+  if (sentiment != null) {
+    const sentLabel = sentiment > 0.2 ? 'bullish' : sentiment < -0.2 ? 'bearish' : 'mixed/neutral'
+    lines.push(`Recent news sentiment is ${sentLabel} (score ${sentiment.toFixed(2)}).`)
+  }
+
+  // Top headline
+  if (articles.length) {
+    lines.push(`Latest headline: "${articles[0].title?.slice(0, 100) || 'N/A'}".`)
+  }
+
+  // Context passthrough
+  if (context && !lines.length) lines.push(`Context: ${context}`)
+
+  if (!lines.length) lines.push(`No live data found for ${ticker}. Run a fetch cycle to populate the dashboard.`)
+
+  return { text: lines.join(' '), model: 'local-rules' }
+}
+
+async function callGrok(ticker, context, prompt) {
+  const systemMsg = `You are a concise financial analyst. Analyze the stock data for ${ticker}. Be direct, factual, highlight key signals. Max 120 words.`
+  const userMsg = prompt || `Analyze ${ticker}. Context: ${context || 'No additional context provided.'}`
+  const resp = await fetch(`${GROK_BASE_URL}/chat/completions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${GROK_API_KEY}` },
+    body: JSON.stringify({ model: GROK_MODEL, messages: [{ role: 'system', content: systemMsg }, { role: 'user', content: userMsg }], max_tokens: 200, temperature: 0.3 }),
+  })
+  if (!resp.ok) throw new Error(`Grok ${resp.status}: ${(await resp.text()).slice(0, 120)}`)
+  const data = await resp.json()
+  return { text: data.choices?.[0]?.message?.content || '', model: GROK_MODEL }
+}
+
+async function callClaude(ticker, context, prompt) {
+  const systemMsg = `You are a concise financial analyst. Analyze the stock data for ${ticker}. Be direct, factual, highlight key signals. Respond in 100 words or fewer.`
+  const userMsg = prompt || `Analyze ${ticker}. Context: ${context || 'No additional context provided.'}`
+  const resp = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': ANTHROPIC_API_KEY,
+      'anthropic-version': '2023-06-01',
+    },
+    body: JSON.stringify({
+      model: CLAUDE_MODEL,
+      max_tokens: 200,
+      system: systemMsg,
+      messages: [{ role: 'user', content: userMsg }],
+    }),
+  })
+  if (!resp.ok) throw new Error(`Claude ${resp.status}: ${(await resp.text()).slice(0, 120)}`)
+  const data = await resp.json()
+  return { text: data.content?.[0]?.text || '', model: CLAUDE_MODEL }
+}
 
 app.post('/api/grok/analyze', async (req, res) => {
-  if (!GROK_API_KEY) {
-    return res.status(503).json({ ok: false, error: 'GROK_API_KEY not configured. Add it to .env to enable AI analysis.' })
-  }
   const { ticker, context, prompt } = req.body || {}
   if (!ticker) return res.status(400).json({ ok: false, error: 'ticker required' })
 
-  const systemMsg = `You are a concise financial analyst. Analyze the provided stock data and news for ${ticker}. Be direct, factual, and highlight key signals. Max 150 words.`
-  const userMsg = prompt || `Analyze ${ticker}. Context: ${context || 'No additional context.'}`
-
+  // Priority: Grok → Claude → local rule-based fallback
   try {
-    const resp = await fetch(`${GROK_BASE_URL}/chat/completions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${GROK_API_KEY}` },
-      body: JSON.stringify({
-        model: GROK_MODEL,
-        messages: [{ role: 'system', content: systemMsg }, { role: 'user', content: userMsg }],
-        max_tokens: 250,
-        temperature: 0.3,
-      }),
-    })
-    if (!resp.ok) {
-      const err = await resp.text()
-      return res.status(resp.status).json({ ok: false, error: `Grok API error ${resp.status}: ${err.slice(0, 200)}` })
+    if (GROK_API_KEY) {
+      const { text, model } = await callGrok(ticker, context, prompt)
+      return res.json({ ok: true, ticker, analysis: text, model })
     }
-    const data = await resp.json()
-    const text = data.choices?.[0]?.message?.content || ''
-    res.json({ ok: true, ticker, analysis: text, model: GROK_MODEL })
+    if (ANTHROPIC_API_KEY) {
+      const { text, model } = await callClaude(ticker, context, prompt)
+      return res.json({ ok: true, ticker, analysis: text, model })
+    }
+    // Always-available local fallback
+    const db = mongoose.connection.db || null
+    const { text, model } = await buildLocalAnalysis(db, ticker, context)
+    return res.json({ ok: true, ticker, analysis: text, model })
   } catch (err) {
-    res.status(500).json({ ok: false, error: String(err.message || err) })
+    // If the external API failed, fall through to local
+    try {
+      const db = mongoose.connection.db || null
+      const { text, model } = await buildLocalAnalysis(db, ticker, context)
+      return res.json({ ok: true, ticker, analysis: text, model: `${model} (api-fallback)` })
+    } catch (e2) {
+      return res.status(500).json({ ok: false, error: String(err.message || err) })
+    }
   }
 })
 
 app.get('/api/grok/status', (req, res) => {
-  res.json({ configured: !!GROK_API_KEY, model: GROK_MODEL })
+  const engine = GROK_API_KEY ? 'grok' : ANTHROPIC_API_KEY ? 'claude' : 'local'
+  const model  = GROK_API_KEY ? GROK_MODEL : ANTHROPIC_API_KEY ? CLAUDE_MODEL : 'local-rules'
+  res.json({ configured: true, engine, model,
+    grok: !!GROK_API_KEY, claude: !!ANTHROPIC_API_KEY })
 })
 
 // ── Reddit OAuth API ─────────────────────────────────────────────────────────
