@@ -6395,7 +6395,7 @@ app.get('/api/reddit/posts/:ticker', async (req, res) => {
     try {
       const after = Math.floor(Date.now() / 1000) - 30 * 86400
       const q = encodeURIComponent(`$${ticker}`)
-      const ppUrl = `https://api.pullpush.io/reddit/search/submission/?q=${q}&subreddit=wallstreetbets,investing,stocks,StockMarket,options&size=${limit * 3}&after=${after}&sort=desc&sort_type=score`
+      const ppUrl = `https://api.pullpush.io/reddit/search/submission/?q=${q}&size=${limit * 3}&after=${after}&sort=desc&sort_type=score`
       const ppResp = await fetch(ppUrl, {
         headers: { 'User-Agent': 'FlashFeed/1.0 financial-dashboard' },
         signal: AbortSignal.timeout(10000),
