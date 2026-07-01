@@ -108,7 +108,7 @@ export function ScreenerRow({ row, columns }: Props) {
           <td key={col.key} className="px-2 py-2 whitespace-nowrap">{renderCell(col.key)}</td>
         ))}
       </tr>
-      {showDetail && <TickerDetailModal ticker={row.ticker} onClose={() => setShowDetail(false)} />}
+      {showDetail && <TickerDetailModal ticker={row.ticker} row={row} onClose={() => setShowDetail(false)} />}
     </>
   )
 }
