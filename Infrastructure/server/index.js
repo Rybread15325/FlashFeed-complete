@@ -6354,80 +6354,95 @@ app.get('/api/reddit/posts/:ticker', async (req, res) => {
   if (!ticker) return res.status(400).json({ ok: false, posts: [], error: 'ticker required' })
 
   const limit = Math.min(Number(req.query.limit) || 10, 25)
+  const SUBS  = 'wallstreetbets+investing+stocks+StockMarket+options+SecurityAnalysis+ValueInvesting'
+  const BROWS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    'Accept': 'application/json',
+    'Accept-Language': 'en-US,en;q=0.9',
+  }
+
+  // Filter: keep only posts that actually mention the ticker
+  const re = new RegExp(`(?:^|\\W)\\$?${ticker}(?:\\W|$)`, 'i')
+  const isRelevant = (title = '', text = '') => re.test(title) || re.test(text)
+
+  const mapJson = (children = []) => children
+    .map(c => c.data).filter(d => d && d.id && isRelevant(d.title, d.selftext))
+    .map(d => ({
+      id: d.id, title: d.title, subreddit: d.subreddit, author: d.author,
+      score: d.score, num_comments: d.num_comments,
+      url: `https://www.reddit.com${d.permalink}`,
+      preview: (d.selftext || '').slice(0, 200).trim() || null,
+      created_utc: d.created_utc,
+    }))
 
   try {
-    // OAuth path: used when credentials are configured
+    // 1. Reddit OAuth — works from any IP when credentials are set
     if (REDDIT_CLIENT_ID && REDDIT_CLIENT_SECRET) {
       const token = await getRedditToken()
       if (token) {
-        const query = encodeURIComponent(`$${ticker}`)
-        const subs  = 'wallstreetbets+investing+stocks+StockMarket+options'
-        const url   = `https://oauth.reddit.com/r/${subs}/search.json?q=${query}&restrict_sr=on&sort=new&limit=${limit}&t=week&type=link`
-        const resp  = await fetch(url, {
-          headers: { 'Authorization': `Bearer ${token}`, 'User-Agent': REDDIT_USER_AGENT },
-        })
+        const q = encodeURIComponent(`$${ticker}`)
+        const url = `https://oauth.reddit.com/r/${SUBS}/search.json?q=${q}&restrict_sr=on&sort=new&limit=${limit}&t=month&type=link`
+        const resp = await fetch(url, { headers: { 'Authorization': `Bearer ${token}`, 'User-Agent': REDDIT_USER_AGENT } })
         if (resp.ok) {
-          const data  = await resp.json()
-          const posts = (data?.data?.children ?? []).map(c => ({
-            id:           c.data.id,
-            title:        c.data.title,
-            subreddit:    c.data.subreddit,
-            author:       c.data.author,
-            score:        c.data.score,
-            num_comments: c.data.num_comments,
-            url:          `https://www.reddit.com${c.data.permalink}`,
-            preview:      (c.data.selftext || '').slice(0, 180).trim() || null,
-            created_utc:  c.data.created_utc,
-          }))
-          return res.json({ ok: true, ticker, posts, source: 'oauth' })
+          const data = await resp.json()
+          const posts = mapJson(data?.data?.children ?? []).slice(0, limit)
+          if (posts.length > 0) return res.json({ ok: true, ticker, posts, source: 'oauth' })
         }
       }
     }
 
-    // No-credential fallback 1: Reddit public JSON API restricted to financial subreddits
+    // 2. PullPush (Pushshift-compatible archive — independent IPs, no Reddit block)
     try {
-      const query = encodeURIComponent(`$${ticker}`)
-      const subs  = 'wallstreetbets+investing+stocks+StockMarket+options+SecurityAnalysis+ValueInvesting+FinancialIndependence'
-      const jsonUrl = `https://www.reddit.com/r/${subs}/search.json?q=${query}&restrict_sr=on&sort=new&t=week&limit=${limit}&type=link`
-      const jsonResp = await fetch(jsonUrl, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-          'Accept': 'application/json',
-          'Accept-Language': 'en-US,en;q=0.9',
-        },
+      const after = Math.floor(Date.now() / 1000) - 30 * 86400
+      const q = encodeURIComponent(`$${ticker}`)
+      const ppUrl = `https://api.pullpush.io/reddit/search/submission/?q=${q}&subreddit=wallstreetbets,investing,stocks,StockMarket,options&size=${limit * 3}&after=${after}&sort=desc&sort_type=score`
+      const ppResp = await fetch(ppUrl, {
+        headers: { 'User-Agent': 'FlashFeed/1.0 financial-dashboard' },
         signal: AbortSignal.timeout(10000),
       })
-      if (jsonResp.ok) {
-        const jsonData = await jsonResp.json()
-        const posts = (jsonData?.data?.children ?? []).map(c => ({
-          id:           c.data.id,
-          title:        c.data.title,
-          subreddit:    c.data.subreddit,
-          author:       c.data.author,
-          score:        c.data.score,
-          num_comments: c.data.num_comments,
-          url:          `https://www.reddit.com${c.data.permalink}`,
-          preview:      (c.data.selftext || '').slice(0, 200).trim() || null,
-          created_utc:  c.data.created_utc,
-        }))
-        if (posts.length > 0) return res.json({ ok: true, ticker, posts, source: 'json' })
+      if (ppResp.ok) {
+        const ppData = await ppResp.json()
+        const posts = (ppData.data || [])
+          .filter(d => d && d.id && isRelevant(d.title, d.selftext))
+          .slice(0, limit)
+          .map(d => ({
+            id: d.id, title: d.title, subreddit: d.subreddit, author: d.author,
+            score: d.score || 0, num_comments: d.num_comments || 0,
+            url: `https://www.reddit.com/r/${d.subreddit}/comments/${d.id}`,
+            preview: (d.selftext || '').slice(0, 200).trim() || null,
+            created_utc: d.created_utc,
+          }))
+        if (posts.length > 0) return res.json({ ok: true, ticker, posts, source: 'pullpush' })
       }
     } catch (_) {}
 
-    // No-credential fallback 2: Reddit Atom/RSS feed on financial subreddits
-    const entries = await fetchRedditRss(ticker, limit)
-    const posts = entries.map(e => ({
-      id:          e.id,
-      title:       e.title,
-      subreddit:   e.subreddit,
-      author:      e.author,
-      score:       null,
-      num_comments: null,
-      url:         e.link,
-      preview:     null,
-      created_utc: e.created_utc,
-    }))
-    return res.json({ ok: true, ticker, posts, source: 'rss' })
+    // 3. Reddit public JSON — try old.reddit.com and www.reddit.com, with and without $ prefix
+    for (const domain of ['old.reddit.com', 'www.reddit.com']) {
+      for (const rawQ of [`$${ticker}`, ticker]) {
+        try {
+          const q = encodeURIComponent(rawQ)
+          const url = `https://${domain}/r/${SUBS}/search.json?q=${q}&restrict_sr=on&sort=new&t=month&limit=${limit * 2}`
+          const resp = await fetch(url, { headers: BROWS, signal: AbortSignal.timeout(8000) })
+          if (!resp.ok) continue
+          const text = await resp.text()
+          if (text.trimStart().startsWith('<')) continue // HTML = IP blocked
+          const data = JSON.parse(text)
+          const posts = mapJson(data?.data?.children ?? []).slice(0, limit)
+          if (posts.length > 0) return res.json({ ok: true, ticker, posts, source: 'reddit-json' })
+        } catch (_) {}
+      }
+    }
+
+    // 4. Reddit RSS — filter strictly for relevance (blocked IPs return generic posts)
+    const entries = await fetchRedditRss(ticker, limit * 3)
+    const posts = entries
+      .filter(e => isRelevant(e.title))
+      .slice(0, limit)
+      .map(e => ({
+        id: e.id, title: e.title, subreddit: e.subreddit, author: e.author,
+        score: null, num_comments: null, url: e.link, preview: null, created_utc: e.created_utc,
+      }))
+    return res.json({ ok: true, ticker, posts, source: posts.length > 0 ? 'rss' : 'none' })
   } catch (e) {
     return res.json({ ok: false, posts: [], error: String(e.message || e) })
   }

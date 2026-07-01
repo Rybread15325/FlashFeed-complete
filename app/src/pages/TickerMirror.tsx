@@ -521,73 +521,97 @@ function TickerMirrorContent({ ticker, row, onClose }: { ticker: string; row: SR
             {newsSubTab === 'reddit' && (
               !redditData
                 ? <div className="text-xs text-neutral animate-pulse">Loading Reddit posts…</div>
-                : !redditData.ok
+                : (redditData.posts ?? []).length === 0
                   ? (
-                    <div className="text-xs text-neutral space-y-1">
-                      <span className="text-yellow-400 font-medium block">Reddit not configured.</span>
-                      <span>Add REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET to .env and restart.</span>
+                    <div className="flex flex-col gap-2 items-start">
+                      <span className="text-xs text-neutral">No relevant Reddit posts found for ${ticker}.</span>
+                      <a
+                        href={`https://www.reddit.com/search/?q=%24${ticker}&sort=new&t=week`}
+                        target="_blank" rel="noreferrer"
+                        className="text-[11px] text-orange-400 hover:text-orange-300 flex items-center gap-1"
+                      >
+                        Search Reddit for ${ticker} →
+                      </a>
                     </div>
                   )
-                  : (redditData.posts ?? []).length === 0
-                    ? <div className="text-xs text-neutral">No Reddit posts found for {ticker} this week.</div>
-                    : (
-                      <div className="flex flex-col gap-2">
-                        {(redditData.posts as any[]).map(p => (
-                          <a key={p.id} href={p.url} target="_blank" rel="noreferrer" className="flex items-start gap-2 group">
-                            <div className="shrink-0 mt-0.5 flex flex-col items-center min-w-[30px]">
-                              <span className="text-orange-400 text-[10px] font-bold leading-none">▲</span>
-                              <span className="text-[10px] text-neutral font-mono">{p.score >= 1000 ? `${(p.score / 1000).toFixed(1)}k` : p.score}</span>
+                  : (
+                    <div className="flex flex-col gap-2">
+                      {redditData.source === 'pullpush' && (
+                        <div className="text-[10px] text-slate-500 mb-1 flex items-center justify-between">
+                          <span>Via Pushshift archive</span>
+                          <a href={`https://www.reddit.com/search/?q=%24${ticker}&sort=new&t=week`} target="_blank" rel="noreferrer" className="text-orange-400 hover:text-orange-300">More on Reddit →</a>
+                        </div>
+                      )}
+                      {(redditData.posts as any[]).map(p => (
+                        <a key={p.id} href={p.url} target="_blank" rel="noreferrer" className="flex items-start gap-2 group">
+                          <div className="shrink-0 mt-0.5 flex flex-col items-center min-w-[30px]">
+                            <span className="text-orange-400 text-[10px] font-bold leading-none">▲</span>
+                            {p.score != null && <span className="text-[10px] text-neutral font-mono">{p.score >= 1000 ? `${(p.score / 1000).toFixed(1)}k` : p.score}</span>}
+                          </div>
+                          <div className="min-w-0">
+                            <div className="text-xs text-slate-200 group-hover:text-white leading-snug line-clamp-2">{p.title}</div>
+                            <div className="text-[10px] text-neutral mt-0.5">
+                              r/{p.subreddit}{p.num_comments != null ? ` · ${p.num_comments} comments` : ''}
+                              {p.created_utc ? ` · ${new Date(p.created_utc * 1000).toLocaleDateString()}` : ''}
                             </div>
-                            <div className="min-w-0">
-                              <div className="text-xs text-slate-200 group-hover:text-white leading-snug line-clamp-1">{p.title}</div>
-                              <div className="text-[10px] text-neutral mt-0.5">
-                                r/{p.subreddit} · {p.num_comments} comments
-                                {p.created_utc ? ` · ${new Date(p.created_utc * 1000).toLocaleDateString()}` : ''}
-                              </div>
-                            </div>
-                          </a>
-                        ))}
-                      </div>
-                    )
+                            {p.preview && <div className="text-[10px] text-slate-400 mt-0.5 line-clamp-1">{p.preview}</div>}
+                          </div>
+                        </a>
+                      ))}
+                    </div>
+                  )
             )}
 
             {newsSubTab === 'twitter' && (
               !twitterData
                 ? <div className="text-xs text-neutral animate-pulse">Loading social posts…</div>
-                : (twitterData.posts ?? []).length === 0
-                  ? <div className="text-xs text-neutral">No recent posts found for {ticker}.</div>
-                  : (
-                    <>
-                      {twitterData.source === 'stocktwits' && (
-                        <div className="text-[10px] text-slate-500 mb-2">Showing StockTwits — add TWITTER_BEARER_TOKEN in Railway for 𝕏 posts</div>
-                      )}
-                      <div className="flex flex-col gap-2">
-                        {(twitterData.posts as any[]).map(p => {
-                          const isSt = twitterData.source === 'stocktwits'
-                          return (
-                            <a key={p.id} href={p.url} target="_blank" rel="noreferrer" className="flex items-start gap-2 group">
-                              <div className="shrink-0 w-7 pt-0.5 flex flex-col items-center gap-0.5">
-                                <span className={`text-[11px] font-bold leading-none ${isSt ? 'text-green-400' : 'text-sky-400'}`}>{isSt ? '𝕊𝕋' : '𝕏'}</span>
-                                {p.likes > 0 && (
-                                  <span className="text-[9px] text-neutral font-mono">{p.likes >= 1000 ? `${(p.likes / 1000).toFixed(1)}k` : p.likes}♥</span>
-                                )}
-                              </div>
-                              <div className="min-w-0">
-                                <div className="text-xs text-slate-200 group-hover:text-white leading-snug line-clamp-3">{p.text}</div>
-                                <div className="text-[10px] text-neutral mt-0.5 flex items-center gap-2">
-                                  <span className={isSt ? 'text-green-500' : 'text-sky-500'}>@{p.author}</span>
-                                  {p.sentiment && <span className={p.sentiment === 'Bullish' ? 'text-emerald-400' : p.sentiment === 'Bearish' ? 'text-red-400' : 'text-neutral'}>{p.sentiment}</span>}
-                                  {p.retweets > 0 && <span>{p.retweets} RT</span>}
-                                  {p.replies > 0  && <span>{p.replies} replies</span>}
-                                  {p.created_at && <span>{new Date(p.created_at).toLocaleDateString()}</span>}
+                : (
+                  <>
+                    <div className="flex items-center justify-between mb-2">
+                      {twitterData.source === 'stocktwits'
+                        ? <span className="text-[10px] text-slate-500">StockTwits live feed</span>
+                        : <span className="text-[10px] text-slate-500">𝕏 posts</span>
+                      }
+                      <a
+                        href={`https://x.com/search?q=%24${ticker}&src=typed_query&f=live`}
+                        target="_blank" rel="noreferrer"
+                        className="text-[11px] text-sky-400 hover:text-sky-300"
+                      >
+                        View ${ticker} on 𝕏 →
+                      </a>
+                    </div>
+                    {(twitterData.posts ?? []).length === 0
+                      ? <div className="text-xs text-neutral">No recent posts found for {ticker}.</div>
+                      : (
+                        <div className="flex flex-col gap-2">
+                          {(twitterData.posts as any[]).map(p => {
+                            const isSt = twitterData.source === 'stocktwits'
+                            return (
+                              <a key={p.id} href={p.url} target="_blank" rel="noreferrer" className="flex items-start gap-2 group">
+                                <div className="shrink-0 w-7 pt-0.5 flex flex-col items-center gap-0.5">
+                                  <span className={`text-[11px] font-bold leading-none ${isSt ? 'text-green-400' : 'text-sky-400'}`}>{isSt ? '𝕊𝕋' : '𝕏'}</span>
+                                  {p.likes > 0 && (
+                                    <span className="text-[9px] text-neutral font-mono">{p.likes >= 1000 ? `${(p.likes / 1000).toFixed(1)}k` : p.likes}♥</span>
+                                  )}
                                 </div>
-                              </div>
-                            </a>
-                          )
-                        })}
-                      </div>
-                    </>
-                  )
+                                <div className="min-w-0">
+                                  <div className="text-xs text-slate-200 group-hover:text-white leading-snug line-clamp-3">{p.text}</div>
+                                  <div className="text-[10px] text-neutral mt-0.5 flex items-center gap-2">
+                                    <span className={isSt ? 'text-green-500' : 'text-sky-500'}>@{p.author}</span>
+                                    {p.sentiment && <span className={p.sentiment === 'Bullish' ? 'text-emerald-400' : p.sentiment === 'Bearish' ? 'text-red-400' : 'text-neutral'}>{p.sentiment}</span>}
+                                    {p.retweets > 0 && <span>{p.retweets} RT</span>}
+                                    {p.replies > 0  && <span>{p.replies} replies</span>}
+                                    {p.created_at && <span>{new Date(p.created_at).toLocaleDateString()}</span>}
+                                  </div>
+                                </div>
+                              </a>
+                            )
+                          })}
+                        </div>
+                      )
+                    }
+                  </>
+                )
             )}
           </div>
         </div>
