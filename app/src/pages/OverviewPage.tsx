@@ -105,23 +105,36 @@ export function OverviewPage() {
 
   const phrases = useMemo(() => {
     const counts = new Map<string, number>()
-    const FINANCE_TERMS = ['bullish', 'bearish', 'short squeeze', 'breakout', 'earnings', 'catalyst', 'moon', 'dump', 'buy', 'sell', 'hold', 'calls', 'puts', 'gamma', 'squeeze', 'rally', 'crash', 'dip', 'ATH', 'support', 'resistance', 'volume', 'momentum', 'upgrade', 'downgrade', 'beat', 'miss', 'guidance']
+    // Only distinctive finance terms — common words (buy/sell/volume) are excluded
+    const FINANCE_TERMS = [
+      'short squeeze', 'gamma squeeze', 'earnings beat', 'earnings miss',
+      'breakout', 'breakdown', 'oversold', 'overbought',
+      'short interest', 'catalyst', 'upgrade', 'downgrade',
+      'buyback', 'dividend', 'merger', 'acquisition', 'FDA approval',
+      'ATH', 'all-time high', 'bull run', 'bear trap', 'dead cat bounce',
+      'guidance raise', 'guidance cut', 'revenue beat', 'short cover',
+    ]
     for (const post of socialPosts) {
-      // Use pipeline-extracted keywords if available
-      const words = [...(post.finance_keywords || []), ...(post.gossip_keywords || []), ...(post.keywords || [])]
-      // Also extract $CASHTAGS and finance terms from text
+      const pipelineWords = [...(post.finance_keywords || []), ...(post.gossip_keywords || [])]
       const text = String(post.text || post.title || post.content || '')
-      for (const match of text.matchAll(/\$([A-Z]{1,6})\b/g)) words.push(match[1])
-      for (const term of FINANCE_TERMS) {
-        if (text.toLowerCase().includes(term)) words.push(term)
-      }
-      for (const raw of words) {
+      const lower = text.toLowerCase()
+      // Prefer pipeline-extracted keywords; also scan for $CASHTAGS
+      for (const raw of pipelineWords) {
         const key = String(raw || '').trim()
-        if (key.length < 2) continue
-        counts.set(key, (counts.get(key) || 0) + 1)
+        if (key.length >= 2) counts.set(key, (counts.get(key) || 0) + 1)
+      }
+      for (const match of text.matchAll(/\$([A-Z]{2,6})\b/g)) {
+        counts.set(match[1], (counts.get(match[1]) || 0) + 1)
+      }
+      for (const term of FINANCE_TERMS) {
+        if (lower.includes(term.toLowerCase())) counts.set(term, (counts.get(term) || 0) + 1)
       }
     }
-    return Array.from(counts.entries()).sort((a, b) => b[1] - a[1]).slice(0, 12)
+    // Only surface terms mentioned in ≥2 posts to filter noise
+    return Array.from(counts.entries())
+      .filter(([, n]) => n >= 2)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 12)
   }, [socialPosts])
 
   const bullishArticles = stats?.sentiment?.bullish ?? 0

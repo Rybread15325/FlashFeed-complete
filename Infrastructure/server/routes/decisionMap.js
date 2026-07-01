@@ -70,11 +70,18 @@ function tickerValues(doc = {}) {
 }
 
 function sentimentScore(doc = {}) {
-  const direct = toNumber(doc.sentiment_score ?? doc.finbert_score ?? doc.vader_score ?? doc.gemini_sentiment, null)
+  const direct = toNumber(
+    doc.sentiment_score ?? doc.finbert_score ?? doc.vader_score ?? doc.gemini_sentiment ??
+    doc.ml_score ?? doc.compound ?? doc.vader_compound ?? doc.score,
+    null
+  )
   if (direct != null) return clamp(direct, -1, 1)
-  const text = String(doc.sentiment || doc.label || '').toLowerCase()
-  if (/bull|positive|buy|beat|raise|approval|award/.test(text)) return 0.65
-  if (/bear|negative|sell|miss|cut|reject|offering|bankrupt/.test(text)) return -0.65
+  // sentiment field might be stored as a number (1 / -1 / 0)
+  const asNum = toNumber(doc.sentiment, null)
+  if (asNum != null && Math.abs(asNum) <= 1 && asNum !== 0) return clamp(asNum, -1, 1)
+  const text = String(doc.sentiment || doc.label || doc.label_text || '').toLowerCase()
+  if (/bull|positive|buy|beat|raise|approval|award|upgrade|strong|outperform/.test(text)) return 0.65
+  if (/bear|negative|sell|miss|cut|reject|offering|bankrupt|downgrade|weak|underperform/.test(text)) return -0.65
   return 0
 }
 
@@ -215,12 +222,17 @@ async function articleEvidence(db, tickers, windowHours) {
   const wanted = new Set(tickers)
   const windowSec = Math.max(1, Number(windowHours || 24)) * 3600
   const sinceSec = Math.floor(Date.now() / 1000) - windowSec
+  const sinceDate = new Date(sinceSec * 1000)
+  // Handle both numeric-seconds and ISODate storage formats
   const docs = await db.collection('articles').find({
     $or: [
       { publish_date: { $gte: sinceSec } },
+      { publish_date: { $gte: sinceDate } },
       { fetched_date: { $gte: sinceSec } },
+      { fetched_date: { $gte: sinceDate } },
       { detected_at: { $gte: sinceSec } },
-      { createdAt: { $gte: new Date(sinceSec * 1000) } },
+      { detected_at: { $gte: sinceDate } },
+      { createdAt: { $gte: sinceDate } },
     ],
   }, {
     projection: {
@@ -263,12 +275,17 @@ async function socialEvidence(db, tickers, windowHours) {
   const wanted = new Set(tickers)
   const windowSec = Math.max(1, Number(windowHours || 24)) * 3600
   const sinceSec = Math.floor(Date.now() / 1000) - windowSec
+  const sinceDate = new Date(sinceSec * 1000)
   const docs = await db.collection('socials').find({
     $or: [
       { timestamp: { $gte: sinceSec } },
+      { timestamp: { $gte: sinceDate } },
       { fetched_at: { $gte: sinceSec } },
+      { fetched_at: { $gte: sinceDate } },
       { created_at: { $gte: sinceSec } },
+      { created_at: { $gte: sinceDate } },
       { detected_at: { $gte: sinceSec } },
+      { detected_at: { $gte: sinceDate } },
     ],
   }, {
     projection: {

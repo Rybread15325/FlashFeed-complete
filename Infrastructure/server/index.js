@@ -353,7 +353,16 @@ app.get('/api/ai/rankings', async (req, res) => {
         rank_seed: index + 1, ticker, company: row.company || '', price: row.price ?? null,
         change_pct: Number(row.change_pct || 0), rel_volume: Number(row.rel_volume || 0), volume: Number(row.volume || 0),
         ai_rank_score: aiRankScore, direction, confidence: Number(Math.abs(blended - 0.5).toFixed(3)),
-        trade_watch_score: Number(tradeScore.toFixed(3)), prediction_signal: activeSignal || null,
+        trade_watch_score: Number(tradeScore.toFixed(3)),
+        prediction_signal: {
+          direction: activeSignal?.direction || (predictionScore >= 0.55 ? 'up' : predictionScore <= 0.45 ? 'down' : 'watch'),
+          probability_up: Number.isFinite(Number(activeSignal?.probability_up)) && Number(activeSignal?.probability_up) > 0
+            ? Number(activeSignal.probability_up)
+            : Number(predictionScore.toFixed(3)),
+          confidence: activeSignal?.confidence ?? Number(Math.abs(predictionScore - 0.5).toFixed(3)),
+          predicted_return_5m: activeSignal?.predicted_return_5m ?? null,
+          model: activeSignal?.model || 'baseline_trade_watch_v1',
+        },
         model_ready: Boolean(modelSignal),
         evidence: {
           news_score: Number((newsAvg * 100).toFixed(1)), news_articles: articleCount,
@@ -6529,20 +6538,25 @@ app.get('/api/ticker/:ticker/keystats', async (req, res) => {
         db.collection('screeners').findOne({ ticker }, { projection: { _id: 0 } }).catch(() => null),
       ])
       const m = { ...(sc || {}), ...(yf || {}) }
-      const h52 = m.high_52w ?? m.week_52_high ?? m.fiftyTwoWeekHigh
-      const l52 = m.low_52w  ?? m.week_52_low  ?? m.fiftyTwoWeekLow
-      if (h52 != null || m.beta != null || m.analyst || m.target_price != null) {
+      const h52 = m.high_52w ?? m.week_52_high ?? m.fiftyTwoWeekHigh ?? m['52W High'] ?? m['week52High']
+      const l52 = m.low_52w  ?? m.week_52_low  ?? m.fiftyTwoWeekLow  ?? m['52W Low']  ?? m['week52Low']
+      const betaVal = m.beta ?? m.Beta ?? m.beta_1y ?? m.betaFiveYMonthly
+      const analystVal = m.analyst ?? m.Recom ?? m.recommendation ?? m['Analyst Recom'] ?? m.analyst_recom ?? m.rating ?? m.recommendationKey
+      const targetVal = m.target_price ?? m.targetMeanPrice ?? m['Target Price'] ?? m.target ?? m.price_target ?? m.priceTarget
+      const floatShortVal = m.float_short ?? m['Short Float'] ?? m.short_float ?? m.short_float_pct ?? m.shortPercentOfFloat
+      const earningsVal = m.earnings_date ?? m.Earnings ?? m.earnings ?? m.next_earnings ?? m.earningsDate ?? m.nextEarningsDate
+      if (h52 != null || betaVal != null || analystVal || targetVal != null || m.market_cap != null || m.pe_ratio != null) {
         stats = {
           high_52w:     h52 != null ? Number(h52) : null,
           low_52w:      l52 != null ? Number(l52) : null,
-          beta:         m.beta         != null ? Number(m.beta)         : null,
-          analyst:      m.analyst      ?? null,
-          target_price: m.target_price ?? m.targetMeanPrice ?? null,
-          float_short:  m.float_short  != null ? Number(m.float_short)  : null,
-          earnings_date: m.earnings_date ?? null,
-          pe_ratio:     m.pe_ratio ?? m.pe ?? null,
-          forward_pe:   m.forward_pe ?? null,
-          market_cap:   m.market_cap ?? null,
+          beta:         betaVal != null ? Number(betaVal) : null,
+          analyst:      analystVal ?? null,
+          target_price: targetVal != null ? Number(targetVal) : null,
+          float_short:  floatShortVal != null ? Number(floatShortVal) : null,
+          earnings_date: earningsVal ?? null,
+          pe_ratio:     m.pe_ratio ?? m.pe ?? m['P/E'] ?? m.trailingPE ?? null,
+          forward_pe:   m.forward_pe ?? m.forwardPE ?? null,
+          market_cap:   m.market_cap ?? m.marketCap ?? null,
         }
       }
     } catch (_) {}
@@ -6594,7 +6608,54 @@ app.get('/api/ticker/:ticker/keystats', async (req, res) => {
         console.warn(`[keystats] Yahoo Finance HTTP ${resp.status} for ${ticker}`)
       }
     } catch (err) {
-      console.warn(`[keystats] Yahoo Finance error for ${ticker}:`, err.message)
+      console.warn(`[keystats] Yahoo Finance v10 error for ${ticker}:`, err.message)
+    }
+
+    // Fallback: Yahoo Finance v7/quote — simpler endpoint, fewer IP blocks
+    if (!stats || stats.analyst == null || stats.beta == null) {
+      try {
+        const v7url = `https://query2.finance.yahoo.com/v7/finance/quote?symbols=${ticker}&fields=beta,recommendationKey,targetMeanPrice,shortPercentOfFloat,earningsTimestampStart,fiftyTwoWeekHigh,fiftyTwoWeekLow,trailingPE,marketCap,forwardPE`
+        const v7resp = await fetch(v7url, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+            'Accept': 'application/json',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Referer': 'https://finance.yahoo.com',
+          },
+          signal: AbortSignal.timeout(8000),
+        })
+        if (v7resp.ok) {
+          const v7json = await v7resp.json()
+          const q = v7json?.quoteResponse?.result?.[0]
+          if (q) {
+            const recKey = typeof q.recommendationKey === 'string' ? q.recommendationKey : ''
+            const analystLabel = { strong_buy: 'Strong Buy', buy: 'Buy', hold: 'Hold', underperform: 'Sell', sell: 'Strong Sell' }[recKey] ?? null
+            let earnings_date = null
+            if (q.earningsTimestampStart) {
+              try { earnings_date = new Date(Number(q.earningsTimestampStart) * 1000).toISOString().split('T')[0] } catch (_) {}
+            }
+            const shortRaw = q.shortPercentOfFloat
+            const prevStats = stats || {}
+            stats = {
+              high_52w:     prevStats.high_52w     ?? (q.fiftyTwoWeekHigh != null ? Number(q.fiftyTwoWeekHigh) : null),
+              low_52w:      prevStats.low_52w      ?? (q.fiftyTwoWeekLow  != null ? Number(q.fiftyTwoWeekLow)  : null),
+              beta:         prevStats.beta         ?? (q.beta             != null ? Number(q.beta)             : null),
+              analyst:      prevStats.analyst      ?? analystLabel,
+              target_price: prevStats.target_price ?? (q.targetMeanPrice  != null ? Number(q.targetMeanPrice)  : null),
+              float_short:  prevStats.float_short  ?? (shortRaw           != null ? +Number(shortRaw * 100).toFixed(2) : null),
+              earnings_date: prevStats.earnings_date ?? earnings_date,
+              pe_ratio:     prevStats.pe_ratio     ?? (q.trailingPE       != null ? Number(q.trailingPE)       : null),
+              forward_pe:   prevStats.forward_pe   ?? (q.forwardPE        != null ? Number(q.forwardPE)        : null),
+              market_cap:   prevStats.market_cap   ?? (q.marketCap        != null ? Number(q.marketCap)        : null),
+              _source: 'yahoo_v7',
+            }
+          }
+        } else {
+          console.warn(`[keystats] Yahoo Finance v7 HTTP ${v7resp.status} for ${ticker}`)
+        }
+      } catch (err) {
+        console.warn(`[keystats] Yahoo Finance v7 error for ${ticker}:`, err.message)
+      }
     }
   }
 
