@@ -199,13 +199,15 @@ export function TopBar() {
   return (
     <>
       <header className="bg-surface border-b border-border flex-shrink-0">
-        <div className="min-h-14 flex items-center gap-3 px-4 py-2">
+        {/* Main toolbar — padding and gap scale with viewport so zoom works */}
+        <div className="flex items-center gap-1 sm:gap-2 lg:gap-3 px-2 sm:px-3 lg:px-4 py-1.5 sm:py-2">
           <NavLink to="/overview" className="flex-shrink-0">
-            <div className="text-accent font-bold text-lg tracking-tight font-mono leading-none">FlashFeed</div>
-            <div className="text-neutral text-[10px] mt-1 uppercase tracking-wide">Financial Intelligence</div>
+            <div className="text-accent font-bold text-sm sm:text-base lg:text-lg tracking-tight font-mono leading-none">FlashFeed</div>
+            <div className="text-neutral text-[9px] sm:text-[10px] mt-0.5 sm:mt-1 uppercase tracking-wide hidden sm:block">Financial Intelligence</div>
           </NavLink>
 
-          <nav className="hidden xl:flex items-center gap-0 ml-2 self-stretch">
+          {/* Desktop nav — visible at lg+ (≈1024px), compacts well at zoom) */}
+          <nav className="hidden lg:flex items-center gap-0 ml-1 xl:ml-2 self-stretch">
             {NAV.map(({ href, label }) => {
               const active = pathname === href || pathname.startsWith(`${href}/`)
               return (
@@ -213,7 +215,7 @@ export function TopBar() {
                   key={href}
                   to={href}
                   className={clsx(
-                    'px-3 py-2 text-xs font-medium transition-colors border-b-2 whitespace-nowrap self-stretch flex items-center',
+                    'px-2 xl:px-3 py-2 text-[10px] xl:text-xs font-medium transition-colors border-b-2 whitespace-nowrap self-stretch flex items-center',
                     active
                       ? 'text-white border-sky-400'
                       : 'text-slate-400 border-transparent hover:text-white hover:border-slate-600'
@@ -228,7 +230,7 @@ export function TopBar() {
           <div className="flex-1" />
 
           {fetchResult && (
-            <span className="hidden lg:inline text-xs text-emerald-400 animate-in whitespace-nowrap">
+            <span className="hidden xl:inline text-[10px] sm:text-xs text-emerald-400 animate-in whitespace-nowrap">
               +{fetchResult.new_articles ?? 0} new{fetchResult.updated_articles !== undefined ? `, ${fetchResult.updated_articles} refreshed` : fetchResult.refreshed_articles !== undefined ? `, ${fetchResult.refreshed_articles} refreshed` : ''} ({((fetchResult.ms ?? 0) / 1000).toFixed(1)}s)
             </span>
           )}
@@ -237,7 +239,7 @@ export function TopBar() {
             onClick={doFetch}
             disabled={fetching || cooldownRemaining > 0}
             title={cooldownRemaining > 0 ? `Fetch available in ${cooldownRemaining}s` : `${fetchMode === 'fast' ? 'Fast trader refresh' : 'Full source refresh'}`}
-            className="px-3 py-1.5 bg-accent text-white text-xs font-medium rounded hover:bg-sky-400 disabled:opacity-50 transition-colors whitespace-nowrap"
+            className="px-2 sm:px-3 py-1 sm:py-1.5 bg-accent text-white text-[10px] sm:text-xs font-medium rounded hover:bg-sky-400 disabled:opacity-50 transition-colors whitespace-nowrap"
           >
             {fetching ? 'Fetching...' : cooldownRemaining > 0 ? `Fetch ${cooldownRemaining}s` : 'Run Now'}
           </button>
@@ -247,13 +249,13 @@ export function TopBar() {
             title={kafkaStatus?.configured
               ? `Redis Stream active · ${kafkaStatus.events_last_hour ?? 0} events/hr`
               : 'Redis not connected — add REDIS_URL in Railway env vars'}
-            className={`hidden md:flex items-center gap-1.5 px-3 py-1.5 border text-xs font-medium rounded transition-colors whitespace-nowrap select-none ${
+            className={`hidden lg:flex items-center gap-1 px-2 sm:px-3 py-1 sm:py-1.5 border text-[10px] sm:text-xs font-medium rounded transition-colors whitespace-nowrap select-none ${
               kafkaStatus?.configured
                 ? 'bg-emerald-500/10 border-emerald-500/40 text-emerald-400'
                 : 'bg-surface border-border text-slate-600'
             }`}
           >
-            <svg className="w-3 h-3 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <svg className="w-2.5 h-2.5 sm:w-3 sm:h-3 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <path d="M22 12h-4l-3 9L9 3l-3 9H2"/>
             </svg>
             {kafkaStatus?.configured
@@ -265,9 +267,9 @@ export function TopBar() {
             onClick={saveToDisk}
             disabled={diskSaving}
             title={lastDiskSave ? `Last saved ${diskTimeAgo()} — click to save current data to disk` : 'Save current articles & social data to disk'}
-            className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 bg-surface border border-border text-xs font-medium text-neutral rounded hover:text-white hover:border-accent disabled:opacity-50 transition-colors whitespace-nowrap"
+            className="hidden md:flex items-center gap-1 px-2 sm:px-3 py-1 sm:py-1.5 bg-surface border border-border text-[10px] sm:text-xs font-medium text-neutral rounded hover:text-white hover:border-accent disabled:opacity-50 transition-colors whitespace-nowrap"
           >
-            <svg xmlns="http://www.w3.org/2000/svg" className="w-3.5 h-3.5 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <svg xmlns="http://www.w3.org/2000/svg" className="w-3 h-3 sm:w-3.5 sm:h-3.5 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/>
             </svg>
             {diskSaving ? 'Saving...' : lastDiskSave ? diskTimeAgo() : 'Disk'}
@@ -277,25 +279,25 @@ export function TopBar() {
             value={fetchMode}
             onChange={e => setFetchMode(e.target.value as 'fast' | 'full')}
             disabled={fetching || watching}
-            className="hidden md:block bg-bg border border-border text-xs text-neutral rounded px-2 py-1.5 focus:outline-none disabled:opacity-50"
+            className="hidden lg:block bg-bg border border-border text-[10px] sm:text-xs text-neutral rounded px-1.5 sm:px-2 py-1 sm:py-1.5 focus:outline-none disabled:opacity-50"
             title="Fast refresh is optimized for top movers. Full refresh runs every broader source sweep."
           >
             <option value="fast">Fast</option>
             <option value="full">Full</option>
           </select>
 
-          <div className="hidden md:flex items-stretch">
+          <div className="hidden lg:flex items-stretch">
             <select
               value={watchInterval}
               onChange={e => setWatchInterval(e.target.value)}
               disabled={watching}
-              className="bg-bg border border-border border-r-0 text-xs text-neutral rounded-l px-2 py-1.5 focus:outline-none disabled:opacity-50"
+              className="bg-bg border border-border border-r-0 text-[10px] sm:text-xs text-neutral rounded-l px-1.5 sm:px-2 py-1 sm:py-1.5 focus:outline-none disabled:opacity-50"
             >
               <option value="60">1m</option>
             </select>
             <button
               onClick={toggleWatch}
-              className={`px-3 py-1.5 text-xs font-medium rounded-r border transition-colors ${
+              className={`px-2 sm:px-3 py-1 sm:py-1.5 text-[10px] sm:text-xs font-medium rounded-r border transition-colors ${
                 watching
                   ? 'bg-emerald-500/20 border-emerald-500/50 text-emerald-400'
                   : 'bg-surface border-border text-neutral hover:text-white hover:border-accent'
@@ -314,7 +316,7 @@ export function TopBar() {
               setLanguage(code)
               ;(window as any).flashfeedTranslateTo?.(code)
             }}
-            className="hidden md:block bg-bg border border-border text-xs text-neutral rounded px-2 py-1.5 focus:outline-none focus:border-accent"
+            className="hidden lg:block bg-bg border border-border text-[10px] sm:text-xs text-neutral rounded px-1.5 sm:px-2 py-1 sm:py-1.5 focus:outline-none focus:border-accent"
             title="Translate entire page"
           >
             {LANGUAGES.map(l => (
@@ -324,12 +326,12 @@ export function TopBar() {
 
           <button
             onClick={() => setShowSentiment(true)}
-            className="hidden lg:inline-flex px-3 py-1.5 text-xs font-medium rounded border border-border text-neutral hover:text-white hover:border-accent transition-colors"
+            className="hidden xl:inline-flex px-2 sm:px-3 py-1 sm:py-1.5 text-[10px] sm:text-xs font-medium rounded border border-border text-neutral hover:text-white hover:border-accent transition-colors"
           >
             Sentiment
           </button>
 
-          <div className="hidden sm:flex items-center gap-2">
+          <div className="hidden sm:flex items-center gap-1 sm:gap-2">
             {(status || stats) && <StatusBadge ok={status?.ok !== false} label={`${stats?.total_all ?? status?.database?.total_all ?? status?.database?.articles ?? 0} articles`} />}
             {marketStatus && <StatusBadge ok={marketStatus.open} label={marketStatus.label || (marketStatus.open ? 'Market Open' : 'Market Closed')} />}
             {watching && <StatusBadge ok={true} label={`Auto ${watchInterval}s`} />}
@@ -342,7 +344,8 @@ export function TopBar() {
           </div>
         </div>
 
-        <nav className="xl:hidden flex items-center gap-0 overflow-x-auto px-4 border-t border-border">
+        {/* Mobile / compact nav — scrollable, shown when desktop nav is hidden */}
+        <nav className="lg:hidden flex items-center gap-0 overflow-x-auto px-2 sm:px-4 border-t border-border">
           {NAV.map(({ href, label }) => {
             const active = pathname === href || pathname.startsWith(`${href}/`)
             return (
@@ -350,7 +353,7 @@ export function TopBar() {
                 key={href}
                 to={href}
                 className={clsx(
-                  'flex-shrink-0 px-3 py-2 text-xs font-medium border-b-2 transition-colors whitespace-nowrap',
+                  'flex-shrink-0 px-2 sm:px-3 py-1.5 sm:py-2 text-[10px] sm:text-xs font-medium border-b-2 transition-colors whitespace-nowrap',
                   active
                     ? 'text-white border-sky-400'
                     : 'text-slate-400 border-transparent hover:text-white'
