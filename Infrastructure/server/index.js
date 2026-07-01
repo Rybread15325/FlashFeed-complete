@@ -3001,8 +3001,9 @@ function parseRedditAtomXml(xml) {
 }
 
 async function fetchRedditRss(ticker, limit = 25) {
-  const query = encodeURIComponent(`${ticker} stock`)
-  const url = `https://www.reddit.com/search.rss?q=${query}&sort=new&t=week&limit=${limit}`
+  const query = encodeURIComponent(`$${ticker}`)
+  const subs  = 'wallstreetbets+investing+stocks+StockMarket+options'
+  const url = `https://www.reddit.com/r/${subs}/search.rss?q=${query}&restrict_sr=on&sort=new&t=week&limit=${limit}`
   const ctrl = new AbortController()
   const tmo = setTimeout(() => ctrl.abort(), 12000)
   try {
@@ -6359,8 +6360,9 @@ app.get('/api/reddit/posts/:ticker', async (req, res) => {
     if (REDDIT_CLIENT_ID && REDDIT_CLIENT_SECRET) {
       const token = await getRedditToken()
       if (token) {
-        const query = encodeURIComponent(`${ticker} stock`)
-        const url   = `https://oauth.reddit.com/search.json?q=${query}&sort=relevance&limit=${limit}&t=week&type=link`
+        const query = encodeURIComponent(`$${ticker}`)
+        const subs  = 'wallstreetbets+investing+stocks+StockMarket+options'
+        const url   = `https://oauth.reddit.com/r/${subs}/search.json?q=${query}&restrict_sr=on&sort=new&limit=${limit}&t=week&type=link`
         const resp  = await fetch(url, {
           headers: { 'Authorization': `Bearer ${token}`, 'User-Agent': REDDIT_USER_AGENT },
         })
@@ -6382,10 +6384,11 @@ app.get('/api/reddit/posts/:ticker', async (req, res) => {
       }
     }
 
-    // No-credential fallback 1: Reddit public JSON API (faster, richer data than RSS)
+    // No-credential fallback 1: Reddit public JSON API restricted to financial subreddits
     try {
-      const query = encodeURIComponent(`${ticker} stock`)
-      const jsonUrl = `https://www.reddit.com/search.json?q=${query}&sort=relevance&t=week&limit=${limit}&type=link`
+      const query = encodeURIComponent(`$${ticker}`)
+      const subs  = 'wallstreetbets+investing+stocks+StockMarket+options+SecurityAnalysis+ValueInvesting+FinancialIndependence'
+      const jsonUrl = `https://www.reddit.com/r/${subs}/search.json?q=${query}&restrict_sr=on&sort=new&t=week&limit=${limit}&type=link`
       const jsonResp = await fetch(jsonUrl, {
         headers: {
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
@@ -6411,7 +6414,7 @@ app.get('/api/reddit/posts/:ticker', async (req, res) => {
       }
     } catch (_) {}
 
-    // No-credential fallback 2: Reddit Atom/RSS feed
+    // No-credential fallback 2: Reddit Atom/RSS feed on financial subreddits
     const entries = await fetchRedditRss(ticker, limit)
     const posts = entries.map(e => ({
       id:          e.id,
