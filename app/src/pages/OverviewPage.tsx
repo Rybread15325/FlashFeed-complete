@@ -86,7 +86,7 @@ export function OverviewPage() {
   const targetLanguage = useTargetLanguage()
   const { data: stats } = useSWR('/api/stats?days=2', fetcher, { refreshInterval: 30_000 })
   const { data: status } = useSWR('/api/status', fetcher, { refreshInterval: 30_000 })
-  const { data: articlesData } = useSWR('/api/articles?limit=30&ticker_only=1&recent_days=2', fetcher, { refreshInterval: 15_000 })
+  const { data: articlesData } = useSWR('/api/articles?limit=60&ticker_only=1&recent_days=2', fetcher, { refreshInterval: 15_000 })
   const { data: socialData } = useSWR('/api/social/rolling?window_minutes=1440&limit=30&ranked=1', fetcher, { refreshInterval: 30_000 })
   const { data: aiOverview } = useSWR('/api/ai/overview?days=3', fetcher, { refreshInterval: 60_000 })
   const { data: socialStats } = useSWR('/api/social/rolling/stats?window_minutes=1440', fetcher, { refreshInterval: 30_000 })
@@ -105,15 +105,23 @@ export function OverviewPage() {
 
   const phrases = useMemo(() => {
     const counts = new Map<string, number>()
+    const FINANCE_TERMS = ['bullish', 'bearish', 'short squeeze', 'breakout', 'earnings', 'catalyst', 'moon', 'dump', 'buy', 'sell', 'hold', 'calls', 'puts', 'gamma', 'squeeze', 'rally', 'crash', 'dip', 'ATH', 'support', 'resistance', 'volume', 'momentum', 'upgrade', 'downgrade', 'beat', 'miss', 'guidance']
     for (const post of socialPosts) {
+      // Use pipeline-extracted keywords if available
       const words = [...(post.finance_keywords || []), ...(post.gossip_keywords || []), ...(post.keywords || [])]
+      // Also extract $CASHTAGS and finance terms from text
+      const text = String(post.text || post.title || post.content || '')
+      for (const match of text.matchAll(/\$([A-Z]{1,6})\b/g)) words.push(match[1])
+      for (const term of FINANCE_TERMS) {
+        if (text.toLowerCase().includes(term)) words.push(term)
+      }
       for (const raw of words) {
         const key = String(raw || '').trim()
         if (key.length < 2) continue
         counts.set(key, (counts.get(key) || 0) + 1)
       }
     }
-    return Array.from(counts.entries()).sort((a, b) => b[1] - a[1]).slice(0, 10)
+    return Array.from(counts.entries()).sort((a, b) => b[1] - a[1]).slice(0, 12)
   }, [socialPosts])
 
   const bullishArticles = stats?.sentiment?.bullish ?? 0
@@ -158,10 +166,10 @@ export function OverviewPage() {
         ) : null}
       </section>
 
-      <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1.45fr)_minmax(320px,0.9fr)_minmax(300px,0.8fr)] gap-4">
+      <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1.45fr)_minmax(320px,0.9fr)_minmax(300px,0.8fr)] gap-4 items-start">
         <section className="min-w-0 bg-surface border border-border rounded-lg overflow-hidden">
           <SectionTitle title="Ticker-Matched News" meta={`${articles.length} latest · 2d`} />
-          <div className="divide-y divide-slate-700/30 max-h-[640px] overflow-y-auto">
+          <div className="divide-y divide-slate-700/30 overflow-y-auto">
             {articles.length ? articles.map(article => (
               <OverviewArticleRow key={article.id || article.article_id || article.url || article.title} article={article} targetLanguage={targetLanguage} />
             )) : (

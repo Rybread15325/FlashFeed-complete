@@ -288,9 +288,17 @@ export function SettingsPage() {
           ))}
         </div>
         {language !== 'en' && (
-          <div className="mt-3 flex items-center gap-2">
+          <div className="mt-3 flex flex-wrap items-center gap-2">
             <span className="text-xs text-neutral">Active:</span>
             <span className="text-xs text-white font-medium">{LANGUAGES.find(l => l.code === language)?.label || language}</span>
+            <a
+              href={`https://translate.google.com/translate?sl=en&tl=${language}&u=${encodeURIComponent('https://app-five-ebon-es5xbeao5w.vercel.app')}`}
+              target="_blank"
+              rel="noreferrer"
+              className="text-xs text-sky-400 hover:text-sky-300 border border-sky-500/30 rounded px-2 py-0.5 flex items-center gap-1"
+            >
+              🌐 Open in Google Translate →
+            </a>
             <button
               onClick={() => setLanguage('en')}
               className="text-xs text-neutral hover:text-white border border-border rounded px-2 py-0.5 ml-auto"

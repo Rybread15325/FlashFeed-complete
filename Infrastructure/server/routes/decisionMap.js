@@ -115,9 +115,13 @@ function sourceFilter(universe) {
     }
   }
   if (value === 'tradingview') return { quote_source: 'tradingview_numeric_screener' }
+  // active_finviz: prefer finviz_elite_screener but fall back to any screener data
   return {
-    quote_source: 'finviz_elite_screener',
-    finviz_status: { $in: [null, 'same', 'added'] },
+    $or: [
+      { quote_source: 'finviz_elite_screener', finviz_status: { $ne: 'dropped' } },
+      { quote_source: { $exists: false } },
+      { quote_source: null },
+    ],
   }
 }
 
@@ -128,14 +132,18 @@ function activeScreenerMatch(query = {}, thresholds) {
   const match = {
     ...sourceFilter(query.universe),
     ticker: { $not: /\./ },
-    exchange: { $in: Array.from(US_EXCHANGES) },
+    $or: [
+      { exchange: { $in: Array.from(US_EXCHANGES) } },
+      { exchange: { $exists: false } },
+      { exchange: null },
+      { exchange: '' },
+    ],
     price: { $gt: 0 },
-    volume: { $gt: 0 },
-    rel_volume: { $gte: minRel },
   }
+  if (minRel > 0) match.rel_volume = { $gte: minRel }
   if (direction === 'up') match.change_pct = { $gte: minAbsChange }
   else if (direction === 'down') match.change_pct = { $lte: -minAbsChange }
-  else match.$expr = { $gte: [{ $abs: { $ifNull: ['$change_pct', 0] } }, minAbsChange] }
+  else if (minAbsChange > 0) match.$expr = { $gte: [{ $abs: { $ifNull: ['$change_pct', 0] } }, minAbsChange] }
   return match
 }
 
