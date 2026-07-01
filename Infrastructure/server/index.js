@@ -6192,6 +6192,111 @@ app.get('/api/grok/status', (req, res) => {
     grok: !!GROK_API_KEY, claude: !!ANTHROPIC_API_KEY })
 })
 
+// ── Key Stats: live 52W, Beta, Analyst, Target, Short Float, Earnings ─────────
+// Tries MongoDB first (finviz_screener merged with screeners), then falls back
+// to a live Yahoo Finance quoteSummary fetch so stats are never blank.
+app.get('/api/ticker/:ticker/keystats', async (req, res) => {
+  const ticker = String(req.params.ticker || '').toUpperCase().trim().replace(/[^A-Z0-9.\-]/g, '')
+  if (!ticker) return res.status(400).json({ ok: false, error: 'ticker required' })
+
+  const cacheKey = `keystats:v1:${ticker}`
+  if (redisReady()) {
+    try {
+      const hit = await redis.get(cacheKey)
+      if (hit) return res.json({ ok: true, ticker, ...JSON.parse(hit), _source: 'cache' })
+    } catch (_) {}
+  }
+
+  let stats = null
+  const db = mongoose.connection.db
+
+  // 1. MongoDB — merge finviz_screener (yfinance enricher writes here) + screeners
+  if (db) {
+    try {
+      const [yf, sc] = await Promise.all([
+        db.collection('finviz_screener').findOne({ ticker }, { projection: { _id: 0 } }).catch(() => null),
+        db.collection('screeners').findOne({ ticker }, { projection: { _id: 0 } }).catch(() => null),
+      ])
+      const m = { ...(sc || {}), ...(yf || {}) }
+      const h52 = m.high_52w ?? m.week_52_high ?? m.fiftyTwoWeekHigh
+      const l52 = m.low_52w  ?? m.week_52_low  ?? m.fiftyTwoWeekLow
+      if (h52 != null || m.beta != null || m.analyst || m.target_price != null) {
+        stats = {
+          high_52w:     h52 != null ? Number(h52) : null,
+          low_52w:      l52 != null ? Number(l52) : null,
+          beta:         m.beta         != null ? Number(m.beta)         : null,
+          analyst:      m.analyst      ?? null,
+          target_price: m.target_price ?? m.targetMeanPrice ?? null,
+          float_short:  m.float_short  != null ? Number(m.float_short)  : null,
+          earnings_date: m.earnings_date ?? null,
+          pe_ratio:     m.pe_ratio ?? m.pe ?? null,
+          forward_pe:   m.forward_pe ?? null,
+          market_cap:   m.market_cap ?? null,
+        }
+      }
+    } catch (_) {}
+  }
+
+  // 2. Live Yahoo Finance fetch when MongoDB is missing the key fields
+  const needsLive = !stats || (stats.high_52w == null && stats.beta == null)
+  if (needsLive) {
+    try {
+      const url = `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${ticker}?modules=summaryDetail,defaultKeyStatistics,financialData,calendarEvents`
+      const resp = await fetch(url, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+          'Accept': 'application/json',
+          'Accept-Language': 'en-US,en;q=0.9',
+        },
+        signal: AbortSignal.timeout(8000),
+      })
+      if (resp.ok) {
+        const json = await resp.json()
+        const r = json?.quoteSummary?.result?.[0]
+        if (r) {
+          const rv = (obj, key) => { const v = obj?.[key]; return v?.raw ?? (typeof v === 'number' ? v : null) }
+          const sd = r.summaryDetail || {}, ks = r.defaultKeyStatistics || {}
+          const fd = r.financialData || {}, cal = r.calendarEvents || {}
+          const recKey = typeof fd.recommendationKey === 'string' ? fd.recommendationKey : ''
+          const analystLabel = { strong_buy: 'Strong Buy', buy: 'Buy', hold: 'Hold', underperform: 'Sell', sell: 'Strong Sell' }[recKey] ?? null
+          let earnings_date = null
+          try {
+            const ed = cal.earnings?.earningsDate?.[0]
+            if (ed?.raw) earnings_date = new Date(ed.raw * 1000).toISOString().split('T')[0]
+          } catch (_) {}
+          const shortPct = rv(ks, 'shortPercentOfFloat')
+          stats = {
+            high_52w:     rv(sd, 'fiftyTwoWeekHigh'),
+            low_52w:      rv(sd, 'fiftyTwoWeekLow'),
+            beta:         rv(sd, 'beta') ?? rv(ks, 'beta'),
+            analyst:      analystLabel,
+            target_price: rv(fd, 'targetMeanPrice'),
+            float_short:  shortPct != null ? +Number(shortPct * 100).toFixed(2) : null,
+            earnings_date,
+            pe_ratio:     rv(sd, 'trailingPE'),
+            forward_pe:   rv(sd, 'forwardPE'),
+            market_cap:   rv(sd, 'marketCap'),
+            _source: 'yahoo',
+          }
+        }
+      } else {
+        console.warn(`[keystats] Yahoo Finance HTTP ${resp.status} for ${ticker}`)
+      }
+    } catch (err) {
+      console.warn(`[keystats] Yahoo Finance error for ${ticker}:`, err.message)
+    }
+  }
+
+  if (!stats) return res.status(404).json({ ok: false, ticker, error: 'No key stats available' })
+
+  // Cache for 30 minutes
+  if (redisReady()) {
+    try { await redis.set(cacheKey, JSON.stringify(stats), 'EX', 1800) } catch (_) {}
+  }
+
+  res.json({ ok: true, ticker, ...stats })
+})
+
 // ── Reddit OAuth API ─────────────────────────────────────────────────────────
 
 const REDDIT_CLIENT_ID     = process.env.REDDIT_CLIENT_ID     || ''

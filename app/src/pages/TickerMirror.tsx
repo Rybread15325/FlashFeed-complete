@@ -172,7 +172,11 @@ function TickerMirrorContent({ ticker, row, onClose }: { ticker: string; row: SR
   const [newsSubTab, setNewsSubTab] = useState<NewsSubTab>('news')
   const [grokText, setGrokText] = useState<string | null>(null)
   const [grokLoading, setGrokLoading] = useState(false)
-  const { data: aiStatus } = useSWR('/api/grok/status', fetcher, { revalidateOnFocus: false })
+  const { data: aiStatus }  = useSWR('/api/grok/status', fetcher, { revalidateOnFocus: false })
+  const { data: keyStats }  = useSWR(`/api/ticker/${ticker}/keystats`, fetcher, { revalidateOnFocus: false })
+
+  // Reads from live keystats first, then falls back to the screener row for that field
+  const ks = (key: string) => keyStats?.[key] ?? (row as any)[key] ?? null
 
   const { range, interval, capLabel } = getChartParams((row as any).market_cap)
   const { data: chartData } = useSWR(`/api/charts/${ticker}?range=${range}&interval=${interval}`, fetcher)
@@ -218,8 +222,10 @@ function TickerMirrorContent({ ticker, row, onClose }: { ticker: string; row: SR
   const normalDensity   = Math.min(1, density)
   const priceDensityCorr = ((absPriceMove + normalDensity) / 2) * (changePct >= 0 ? 1 : -1)
 
-  const w52range = (row as any).low_52w != null && (row as any).high_52w != null
-    ? `$${Number((row as any).low_52w).toFixed(2)} – $${Number((row as any).high_52w).toFixed(2)}`
+  const low52  = ks('low_52w')
+  const high52 = ks('high_52w')
+  const w52range = low52 != null && high52 != null
+    ? `$${Number(low52).toFixed(2)} – $${Number(high52).toFixed(2)}`
     : '—'
 
   const priceChanges: [string, number | null | undefined][] = [
@@ -338,18 +344,18 @@ function TickerMirrorContent({ ticker, row, onClose }: { ticker: string; row: SR
           <div className="w-[200px] shrink-0 p-3">
             <div className="text-[10px] text-slate-500 uppercase tracking-wide mb-2">Key Stats</div>
             {([
-              ['Market Cap', fmtM((row as any).market_cap)],
-              ['P/E', fmt(row.pe_ratio, 1)],
+              ['Market Cap', fmtM(ks('market_cap'))],
+              ['P/E', fmt(ks('pe_ratio'), 1)],
               ['52W Range', w52range],
-              ['Analyst', row.analyst ?? '—'],
-              ['Target', (row as any).target_price != null ? `$${Number((row as any).target_price).toFixed(2)}` : '—'],
-              ['Beta', fmt((row as any).beta, 2)],
-              ['Short Float', (row as any).float_short != null ? `${(row as any).float_short.toFixed(1)}%` : '—'],
-              ['Earnings', (row as any).earnings_date ?? '—'],
+              ['Analyst', ks('analyst') ?? '—'],
+              ['Target', ks('target_price') != null ? `$${Number(ks('target_price')).toFixed(2)}` : '—'],
+              ['Beta', fmt(ks('beta'), 2)],
+              ['Short Float', ks('float_short') != null ? `${Number(ks('float_short')).toFixed(1)}%` : '—'],
+              ['Earnings', ks('earnings_date') ?? '—'],
             ] as [string, string][]).map(([l, v]) => (
               <div key={l} className="flex justify-between text-[11px] border-b border-border/10 py-1">
                 <span className="text-neutral">{l}</span>
-                <span className={`font-mono ${l === 'Analyst' ? analystColor(row.analyst) : 'text-white'}`}>{v}</span>
+                <span className={`font-mono ${l === 'Analyst' ? analystColor(ks('analyst')) : 'text-white'}`}>{v}</span>
               </div>
             ))}
           </div>
@@ -362,16 +368,16 @@ function TickerMirrorContent({ ticker, row, onClose }: { ticker: string; row: SR
           {([
             ['RSI',        fmt((row as any).rsi, 1)],
             ['ATR',        fmt((row as any).atr, 2)],
-            ['Beta',       fmt((row as any).beta, 2)],
+            ['Beta',       fmt(ks('beta'), 2)],
             ['SMA 20',     fmtPct((row as any).sma20)],
             ['SMA 50',     fmtPct((row as any).sma50)],
             ['SMA 200',    fmtPct((row as any).sma200)],
             ['Gap',        fmtPct((row as any).gap)],
             ['Rel Vol',    (row as any).rel_volume != null ? `${Number((row as any).rel_volume).toFixed(2)}x` : '—'],
             ['Avg Vol',    fmtM((row as any).avg_volume)],
-            ['52W High',   (row as any).high_52w != null ? `$${Number((row as any).high_52w).toFixed(2)}` : '—'],
-            ['52W Low',    (row as any).low_52w  != null ? `$${Number((row as any).low_52w).toFixed(2)}`  : '—'],
-            ['Short Float',(row as any).float_short != null ? `${(row as any).float_short.toFixed(1)}%` : '—'],
+            ['52W High',   high52 != null ? `$${Number(high52).toFixed(2)}` : '—'],
+            ['52W Low',    low52  != null ? `$${Number(low52).toFixed(2)}`  : '—'],
+            ['Short Float', ks('float_short') != null ? `${Number(ks('float_short')).toFixed(1)}%` : '—'],
           ] as [string, string][]).map(([l, v]) => (
             <div key={l} className="flex justify-between text-[11px] border-b border-border/10 py-1.5">
               <span className="text-neutral">{l}</span>
@@ -385,9 +391,9 @@ function TickerMirrorContent({ ticker, row, onClose }: { ticker: string; row: SR
       {activeSection === 'financials' && (
         <div className="p-4 grid grid-cols-2 sm:grid-cols-3 gap-x-6">
           {([
-            ['Market Cap',    fmtM((row as any).market_cap)],
-            ['P/E',           fmt(row.pe_ratio, 1)],
-            ['Fwd P/E',       fmt((row as any).forward_pe, 1)],
+            ['Market Cap',    fmtM(ks('market_cap'))],
+            ['P/E',           fmt(ks('pe_ratio'), 1)],
+            ['Fwd P/E',       fmt(ks('forward_pe'), 1)],
             ['PEG',           fmt((row as any).peg, 2)],
             ['P/S',           fmt((row as any).ps_ratio, 2)],
             ['P/B',           fmt((row as any).pb_ratio, 2)],
@@ -400,7 +406,7 @@ function TickerMirrorContent({ ticker, row, onClose }: { ticker: string; row: SR
             ['Inst Own',      (row as any).inst_own != null ? `${(row as any).inst_own.toFixed(1)}%` : '—'],
             ['Insider Own',   (row as any).insider_own != null ? `${(row as any).insider_own.toFixed(1)}%` : '—'],
             ['Debt/Eq',       fmt((row as any).debt_equity, 2)],
-            ['Earnings',      (row as any).earnings_date ?? '—'],
+            ['Earnings',      ks('earnings_date') ?? '—'],
           ] as [string, string][]).map(([l, v]) => (
             <div key={l} className="flex justify-between text-[11px] border-b border-border/10 py-1.5">
               <span className="text-neutral">{l}</span>
