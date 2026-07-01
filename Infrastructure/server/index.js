@@ -6381,7 +6381,36 @@ app.get('/api/reddit/posts/:ticker', async (req, res) => {
       }
     }
 
-    // No-credential fallback: Reddit public RSS (Atom) feed — no API key required
+    // No-credential fallback 1: Reddit public JSON API (faster, richer data than RSS)
+    try {
+      const query = encodeURIComponent(`${ticker} stock`)
+      const jsonUrl = `https://www.reddit.com/search.json?q=${query}&sort=relevance&t=week&limit=${limit}&type=link`
+      const jsonResp = await fetch(jsonUrl, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+          'Accept': 'application/json',
+          'Accept-Language': 'en-US,en;q=0.9',
+        },
+        signal: AbortSignal.timeout(10000),
+      })
+      if (jsonResp.ok) {
+        const jsonData = await jsonResp.json()
+        const posts = (jsonData?.data?.children ?? []).map(c => ({
+          id:           c.data.id,
+          title:        c.data.title,
+          subreddit:    c.data.subreddit,
+          author:       c.data.author,
+          score:        c.data.score,
+          num_comments: c.data.num_comments,
+          url:          `https://www.reddit.com${c.data.permalink}`,
+          preview:      (c.data.selftext || '').slice(0, 200).trim() || null,
+          created_utc:  c.data.created_utc,
+        }))
+        if (posts.length > 0) return res.json({ ok: true, ticker, posts, source: 'json' })
+      }
+    } catch (_) {}
+
+    // No-credential fallback 2: Reddit Atom/RSS feed
     const entries = await fetchRedditRss(ticker, limit)
     const posts = entries.map(e => ({
       id:          e.id,
@@ -6411,60 +6440,73 @@ app.get('/api/twitter/posts/:ticker', async (req, res) => {
   const ticker = (req.params.ticker || '').toUpperCase().trim()
   if (!ticker) return res.status(400).json({ ok: false, posts: [], error: 'ticker required' })
 
-  if (!TWITTER_BEARER_TOKEN) {
-    return res.json({
-      ok: false,
-      posts: [],
-      error: 'Twitter API not configured. Add TWITTER_BEARER_TOKEN to .env (get from developer.x.com)',
-    })
-  }
-
   const limit = Math.min(Math.max(1, Number(req.query.limit) || 10), 100)
 
-  try {
-    // Search cashtag + company name, exclude retweets, English only
-    const q = encodeURIComponent(`$${ticker} lang:en -is:retweet`)
-    const fields = 'created_at,public_metrics,author_id,text'
-    const expansions = 'author_id'
-    const userFields = 'username,name,verified'
-    const url = `https://api.twitter.com/2/tweets/search/recent?query=${q}&tweet.fields=${fields}&expansions=${expansions}&user.fields=${userFields}&max_results=${limit}`
+  // 1. Twitter API v2 (when bearer token is configured)
+  if (TWITTER_BEARER_TOKEN) {
+    try {
+      const q = encodeURIComponent(`$${ticker} lang:en -is:retweet`)
+      const fields = 'created_at,public_metrics,author_id,text'
+      const url = `https://api.twitter.com/2/tweets/search/recent?query=${q}&tweet.fields=${fields}&expansions=author_id&user.fields=username,name,verified&max_results=${limit}`
+      const resp = await fetch(url, { headers: { 'Authorization': `Bearer ${TWITTER_BEARER_TOKEN}` } })
 
-    const resp = await fetch(url, {
-      headers: { 'Authorization': `Bearer ${TWITTER_BEARER_TOKEN}` },
-    })
-
-    if (resp.status === 401) return res.json({ ok: false, posts: [], error: 'Twitter Bearer Token invalid or expired' })
-    if (resp.status === 403) return res.json({ ok: false, posts: [], error: 'Twitter API access forbidden — check your app permissions and plan' })
-    if (!resp.ok) return res.json({ ok: false, posts: [], error: `Twitter API error ${resp.status}` })
-
-    const data = await resp.json()
-    if (data.errors) return res.json({ ok: false, posts: [], error: data.errors[0]?.message || 'Twitter API error' })
-
-    // Build user lookup map from includes
-    const userMap = new Map()
-    for (const u of (data.includes?.users ?? [])) userMap.set(u.id, u)
-
-    const posts = (data.data ?? []).map(t => {
-      const user = userMap.get(t.author_id) || {}
-      return {
-        id:          t.id,
-        text:        t.text,
-        author:      user.username || t.author_id,
-        author_name: user.name || '',
-        verified:    user.verified || false,
-        likes:       t.public_metrics?.like_count    ?? 0,
-        retweets:    t.public_metrics?.retweet_count ?? 0,
-        replies:     t.public_metrics?.reply_count   ?? 0,
-        impressions: t.public_metrics?.impression_count ?? 0,
-        created_at:  t.created_at,
-        url:         `https://x.com/${user.username || 'i'}/status/${t.id}`,
+      if (resp.ok) {
+        const data = await resp.json()
+        if (!data.errors) {
+          const userMap = new Map()
+          for (const u of (data.includes?.users ?? [])) userMap.set(u.id, u)
+          const posts = (data.data ?? []).map(t => {
+            const user = userMap.get(t.author_id) || {}
+            return {
+              id: t.id, text: t.text,
+              author: user.username || t.author_id,
+              author_name: user.name || '',
+              verified: user.verified || false,
+              likes: t.public_metrics?.like_count ?? 0,
+              retweets: t.public_metrics?.retweet_count ?? 0,
+              replies: t.public_metrics?.reply_count ?? 0,
+              created_at: t.created_at,
+              url: `https://x.com/${user.username || 'i'}/status/${t.id}`,
+            }
+          })
+          return res.json({ ok: true, ticker, posts, source: 'twitter' })
+        }
       }
-    })
-
-    res.json({ ok: true, ticker, posts, result_count: data.meta?.result_count ?? posts.length })
-  } catch (e) {
-    res.json({ ok: false, posts: [], error: String(e.message || e) })
+    } catch (_) {}
   }
+
+  // 2. StockTwits fallback — public API, no auth required, financial-focused
+  try {
+    const stUrl = `https://api.stocktwits.com/api/2/streams/symbol/${encodeURIComponent(ticker)}.json?limit=${Math.min(limit, 30)}`
+    const stResp = await fetch(stUrl, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; FlashFeed/1.0)' },
+      signal: AbortSignal.timeout(10000),
+    })
+    if (stResp.ok) {
+      const stData = await stResp.json()
+      const posts = (stData.messages || []).map(msg => {
+        const sentimentRaw = msg.entities?.sentiment?.basic
+        return {
+          id:         String(msg.id),
+          text:       msg.body || '',
+          author:     msg.user?.username || '',
+          author_name: msg.user?.name || '',
+          verified:   msg.user?.official || false,
+          likes:      msg.likes?.total || 0,
+          retweets:   0,
+          replies:    0,
+          sentiment:  sentimentRaw || null,
+          created_at: msg.created_at,
+          url:        `https://stocktwits.com/symbol/${ticker}`,
+        }
+      })
+      return res.json({ ok: true, ticker, posts, source: 'stocktwits' })
+    }
+  } catch (err) {
+    console.warn(`[stocktwits-fallback] ${ticker}:`, err.message)
+  }
+
+  res.json({ ok: true, ticker, posts: [], source: 'none', note: 'No social posts found' })
 })
 
 // ── Session beacon: browser calls this on pagehide to trigger auto-save ──────
