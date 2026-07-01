@@ -54,6 +54,18 @@ function colorForQuadrant(q: string) {
   return 0x94a3b8
 }
 
+// Smooth gradient: red (bearish) → slate (neutral) → green (bullish)
+function colorForSentiment(sentiment: number): number {
+  const s = Math.max(-1, Math.min(1, Number(sentiment) || 0))
+  if (s >= 0.35)  return 0x10b981  // strong bullish — emerald-500
+  if (s >= 0.12)  return 0x34d399  // bullish — emerald-400
+  if (s >= 0.04)  return 0x6ee7b7  // slight bullish — emerald-300
+  if (s <= -0.35) return 0xdc2626  // strong bearish — red-600
+  if (s <= -0.12) return 0xf87171  // bearish — red-400
+  if (s <= -0.04) return 0xfca5a5  // slight bearish — red-300
+  return 0x94a3b8                   // neutral — slate-400
+}
+
 function dotClass(q: string) {
   if (q === 'Q1') return 'bg-emerald-400'
   if (q === 'Q3') return 'bg-red-400'
@@ -161,12 +173,13 @@ function ThreeDecisionMap({ rows, zoom, resetKey, isLoading }: { rows: DecisionM
     const sphereGeometry = new THREE.SphereGeometry(1, 24, 16)
     const meshes: THREE.Mesh[] = []
     rows.slice(0, 140).forEach((row, index) => {
+      const col = colorForSentiment(row.combinedSentiment)
       const material = new THREE.MeshStandardMaterial({
-        color: colorForQuadrant(row.quadrant),
-        roughness: 0.42,
-        metalness: 0.12,
-        emissive: colorForQuadrant(row.quadrant),
-        emissiveIntensity: 0.11,
+        color: col,
+        roughness: 0.38,
+        metalness: 0.15,
+        emissive: col,
+        emissiveIntensity: Math.abs(Number(row.combinedSentiment) || 0) > 0.12 ? 0.22 : 0.08,
       })
       const mesh = new THREE.Mesh(sphereGeometry, material)
       mesh.position.copy(pointPosition(row))
@@ -372,10 +385,16 @@ export function DecisionMapPanel() {
             <div className="text-[11px] text-slate-400">X sentiment · Y price change · Z relative volume · bubble rolling volume</div>
           </div>
           <div className="flex flex-wrap items-center gap-2 text-[11px] text-neutral">
-            {['Q1', 'Q2', 'Q3', 'Q4', 'Neutral'].map(q => (
-              <span key={q} className="inline-flex items-center gap-1">
-                <span className={clsx('h-2 w-2 rounded-full', dotClass(q))} />
-                {q}
+            {[
+              { color: 'bg-emerald-500', label: 'Strong Bullish' },
+              { color: 'bg-emerald-400', label: 'Bullish' },
+              { color: 'bg-slate-400',   label: 'Neutral' },
+              { color: 'bg-red-400',     label: 'Bearish' },
+              { color: 'bg-red-600',     label: 'Strong Bearish' },
+            ].map(({ color, label }) => (
+              <span key={label} className="inline-flex items-center gap-1">
+                <span className={clsx('h-2 w-2 rounded-full', color)} />
+                {label}
               </span>
             ))}
             <button onClick={() => mutate()} className="rounded border border-border bg-bg px-2 py-1 text-slate-200 hover:text-white">Refresh</button>
