@@ -16,12 +16,12 @@ const NAV = [
   { href: '/overview', label: 'Overview' },
   { href: '/momentum', label: 'Top Movers' },
   { href: '/decision-map', label: 'Decision Map' },
-  { href: '/predictions', label: 'Predicted Up Tomorrow' },
+  { href: '/predictions', label: 'Predicted Up' },
   { href: '/ai', label: 'High Conviction' },
-  { href: '/news', label: 'News/Catalysts' },
+  { href: '/news', label: 'News' },
   { href: '/charts', label: 'Charts' },
   { href: '/charts-grid', label: 'Charts Grid' },
-  { href: '/social', label: 'Social Feed' },
+  { href: '/social', label: 'Social' },
   { href: '/screener', label: 'Screener' },
   { href: '/correlation', label: 'Correlation' },
   { href: '/settings', label: 'Settings' },
@@ -43,7 +43,7 @@ export function TopBar() {
   const [watching, setWatching] = useState(false)
   const [watchInterval, setWatchInterval] = useState('60')
   const [fetchMode, setFetchMode] = useState<'fast' | 'full'>('fast')
-  const [watchLines, setWatchLines] = useState<Array<{ text: string; type: string; ts: number }>>([])
+  const [, setWatchLines] = useState<Array<{ text: string; type: string; ts: number }>>([])
   const [showSentiment, setShowSentiment] = useState(false)
   const [lastAutoResult, setLastAutoResult] = useState<{ new?: number; updated?: number; ms?: number; at: number } | null>(null)
   const watchRef = useRef<EventSource | null>(null)
@@ -206,8 +206,8 @@ export function TopBar() {
             <div className="text-neutral text-[9px] sm:text-[10px] mt-0.5 sm:mt-1 uppercase tracking-wide hidden sm:block">Financial Intelligence</div>
           </NavLink>
 
-          {/* Desktop nav — visible at lg+ (≈1024px), compacts well at zoom) */}
-          <nav className="hidden lg:flex items-center gap-0 ml-1 xl:ml-2 self-stretch">
+          {/* Desktop nav */}
+          <nav className="hidden xl:flex items-center gap-1 ml-2">
             {NAV.map(({ href, label }) => {
               const active = pathname === href || pathname.startsWith(`${href}/`)
               return (
@@ -215,10 +215,10 @@ export function TopBar() {
                   key={href}
                   to={href}
                   className={clsx(
-                    'px-2 xl:px-3 py-2 text-[10px] xl:text-xs font-medium transition-colors border-b-2 whitespace-nowrap self-stretch flex items-center',
+                    'px-2.5 py-1.5 text-xs rounded-md border transition-colors whitespace-nowrap',
                     active
-                      ? 'text-white border-sky-400'
-                      : 'text-slate-400 border-transparent hover:text-white hover:border-slate-600'
+                      ? 'bg-accent/15 border-accent/50 text-white'
+                      : 'border-transparent text-neutral hover:text-white hover:bg-bg/60'
                   )}
                 >
                   {label}
@@ -345,7 +345,7 @@ export function TopBar() {
         </div>
 
         {/* Mobile / compact nav — scrollable, shown when desktop nav is hidden */}
-        <nav className="lg:hidden flex items-center gap-0 overflow-x-auto px-2 sm:px-4 border-t border-border">
+        <nav className="xl:hidden flex items-center gap-1 overflow-x-auto px-4 pb-2">
           {NAV.map(({ href, label }) => {
             const active = pathname === href || pathname.startsWith(`${href}/`)
             return (
@@ -353,10 +353,10 @@ export function TopBar() {
                 key={href}
                 to={href}
                 className={clsx(
-                  'flex-shrink-0 px-2 sm:px-3 py-1.5 sm:py-2 text-[10px] sm:text-xs font-medium border-b-2 transition-colors whitespace-nowrap',
+                  'flex-shrink-0 px-3 py-1.5 text-xs rounded-md border transition-colors whitespace-nowrap',
                   active
-                    ? 'text-white border-sky-400'
-                    : 'text-slate-400 border-transparent hover:text-white'
+                    ? 'bg-accent/15 border-accent/50 text-white'
+                    : 'border-border text-neutral hover:text-white'
                 )}
               >
                 {label}
