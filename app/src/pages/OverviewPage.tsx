@@ -232,7 +232,8 @@ export function OverviewPage() {
             {tickerMentions.length ? tickerMentions.map(row => {
               const bullish = row.bullish ?? 0
               const bearish = row.bearish ?? 0
-              const total = Math.max(1, row.count || 0)
+              const sentTotal = Math.max(1, bullish + bearish)
+              const hasSentiment = (bullish + bearish) > 0
               return (
                 <div key={row.ticker} className="bg-bg/60 border border-border rounded p-2">
                   <div className="flex items-center justify-between gap-2 mb-1">
@@ -240,8 +241,14 @@ export function OverviewPage() {
                     <span className="text-[11px] text-neutral">{compact(row.count)} mentions</span>
                   </div>
                   <div className="flex h-1.5 rounded-full overflow-hidden bg-slate-700">
-                    <div className="bg-emerald-500" style={{ width: `${(bullish / total) * 100}%` }} />
-                    <div className="bg-red-500" style={{ width: `${(bearish / total) * 100}%` }} />
+                    {hasSentiment ? (
+                      <>
+                        <div className="bg-emerald-500" style={{ width: `${(bullish / sentTotal) * 100}%` }} />
+                        <div className="bg-red-500" style={{ width: `${(bearish / sentTotal) * 100}%` }} />
+                      </>
+                    ) : (
+                      <div className="bg-slate-600 w-full" />
+                    )}
                   </div>
                   <div className="flex justify-between text-[10px] text-neutral mt-1">
                     <span className="text-emerald-400">{bullish} bullish</span>

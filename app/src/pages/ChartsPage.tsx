@@ -6,6 +6,7 @@ import { RSIChart } from './RSIChart'
 import { MACDChart } from './MACDChart'
 import { ResearchChart, type ResearchMode } from './ResearchChart'
 import { getAllChartStocks } from '../lib/stocks'
+import { ChartsGridPage } from './ChartsGridPage'
 
 interface ChartData {
   candles: Array<{ time: string | number; open: number; high: number; low: number; close: number; volume?: number }>
@@ -41,6 +42,7 @@ const WIN_OPTS: Array<{ key: 'full' | '2h' | '1h'; label: string }> = [
 ]
 
 export function ChartsPage() {
+  const [chartsTab, setChartsTab] = useState<'charts' | 'grid'>('charts')
   const [ticker, setTicker]         = useState('AAPL')
   const [range, setRange]           = useState<string>('1d')
   const [interval, setInterval]     = useState<string>('1m')
@@ -78,6 +80,26 @@ export function ChartsPage() {
 
   return (
     <div>
+      {/* Charts / Charts Grid sub-tabs */}
+      <div className="flex items-center gap-1 border-b border-border mb-4">
+        {(['charts', 'grid'] as const).map(tab => (
+          <button
+            key={tab}
+            onClick={() => setChartsTab(tab)}
+            className={`px-4 py-2 text-xs font-medium border-b-2 -mb-px transition-colors whitespace-nowrap ${
+              chartsTab === tab
+                ? 'text-white border-sky-400'
+                : 'text-neutral border-transparent hover:text-white hover:border-slate-600'
+            }`}
+          >
+            {tab === 'charts' ? 'Charts' : 'Charts Grid'}
+          </button>
+        ))}
+      </div>
+
+      {chartsTab === 'grid' && <ChartsGridPage />}
+      {chartsTab === 'charts' && <>
+
       {/* Toolbar */}
       <div className="flex items-center gap-2 mb-3 flex-wrap">
         <select
@@ -210,6 +232,8 @@ export function ChartsPage() {
           {loading ? 'Loading chart…' : 'Enter a ticker and click Load Chart.'}
         </div>
       )}
+
+      </>}
     </div>
   )
 }

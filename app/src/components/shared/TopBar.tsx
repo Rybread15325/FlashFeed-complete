@@ -5,7 +5,7 @@ import { clsx } from 'clsx'
 import { StatusBadge } from './StatusBadge'
 import { useToast } from '@/components/shared/Toast'
 import { SentimentModal } from '@/components/shared/SentimentModal'
-import { useLanguage, LANGUAGES } from '@/lib/language'
+import { useLanguage } from '@/lib/language'
 
 const fetcher = (url: string) => fetch(url).then(r => r.json())
 
@@ -19,9 +19,7 @@ const NAV = [
   { href: '/screener', label: 'Screener' },
   { href: '/social', label: 'Social' },
   { href: '/charts', label: 'Charts' },
-  { href: '/charts-grid', label: 'Charts Grid' },
   { href: '/momentum', label: 'Momentum' },
-  { href: '/correlation', label: 'Correlation' },
   { href: '/settings', label: 'Settings' },
 ]
 
@@ -33,13 +31,11 @@ export function TopBar() {
   const { data: status, mutate: mutateStatus } = useSWR('/api/status', fetcher, { refreshInterval: 30_000 })
   const { data: stats } = useSWR('/api/stats?days=0', fetcher, { refreshInterval: 30_000 })
   const { data: marketStatus } = useSWR('/api/market/status', fetcher, { refreshInterval: 60_000 })
-  const { data: kafkaStatus } = useSWR('/api/kafka/status', fetcher, { refreshInterval: 60_000 })
-
   const [fetching, setFetching] = useState(false)
   const [fetchResult, setFetchResult] = useState<{ new_articles?: number; updated_articles?: number; refreshed_articles?: number; unchanged_articles?: number; total_articles?: number; ms?: number } | null>(null)
   const [cooldownRemaining, setCooldownRemaining] = useState(0)
   const [watching, setWatching] = useState(false)
-  const [watchInterval, setWatchInterval] = useState('60')
+  const watchInterval = '60'
   const [fetchMode, setFetchMode] = useState<'fast' | 'full'>('fast')
   const [, setWatchLines] = useState<Array<{ text: string; type: string; ts: number }>>([])
   const [showSentiment, setShowSentiment] = useState(false)
@@ -206,7 +202,7 @@ export function TopBar() {
 
           {/* Desktop nav */}
           <nav className="hidden xl:flex items-center gap-1 ml-2">
-            {NAV.map(({ href, label }) => {
+            {NAV.slice(0, -1).map(({ href, label }) => {
               const active = pathname === href || pathname.startsWith(`${href}/`)
               return (
                 <NavLink
@@ -223,6 +219,23 @@ export function TopBar() {
                 </NavLink>
               )
             })}
+            <button
+              onClick={() => setShowSentiment(true)}
+              className="px-2.5 py-1.5 text-xs rounded-md border border-transparent text-neutral hover:text-white hover:bg-bg/60 transition-colors whitespace-nowrap"
+            >
+              Sentiment
+            </button>
+            <NavLink
+              to="/settings"
+              className={clsx(
+                'px-2.5 py-1.5 text-xs rounded-md border transition-colors whitespace-nowrap',
+                pathname === '/settings'
+                  ? 'bg-accent/15 border-accent/50 text-white'
+                  : 'border-transparent text-neutral hover:text-white hover:bg-bg/60'
+              )}
+            >
+              Settings
+            </NavLink>
           </nav>
 
           <div className="flex-1" />
@@ -241,25 +254,6 @@ export function TopBar() {
           >
             {fetching ? 'Fetching...' : cooldownRemaining > 0 ? `Fetch ${cooldownRemaining}s` : 'Run Now'}
           </button>
-
-          {/* Redis Stream indicator */}
-          <div
-            title={kafkaStatus?.configured
-              ? `Redis Stream active · ${kafkaStatus.events_last_hour ?? 0} events/hr`
-              : 'Redis not connected — add REDIS_URL in Railway env vars'}
-            className={`hidden lg:flex items-center gap-1 px-2 sm:px-3 py-1 sm:py-1.5 border text-[10px] sm:text-xs font-medium rounded transition-colors whitespace-nowrap select-none ${
-              kafkaStatus?.configured
-                ? 'bg-emerald-500/10 border-emerald-500/40 text-emerald-400'
-                : 'bg-surface border-border text-slate-600'
-            }`}
-          >
-            <svg className="w-2.5 h-2.5 sm:w-3 sm:h-3 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M22 12h-4l-3 9L9 3l-3 9H2"/>
-            </svg>
-            {kafkaStatus?.configured
-              ? `Stream · ${kafkaStatus.events_last_hour ?? 0}/hr`
-              : 'Stream ✗'}
-          </div>
 
           <button
             onClick={saveToDisk}
@@ -284,49 +278,16 @@ export function TopBar() {
             <option value="full">Full</option>
           </select>
 
-          <div className="hidden lg:flex items-stretch">
-            <select
-              value={watchInterval}
-              onChange={e => setWatchInterval(e.target.value)}
-              disabled={watching}
-              className="bg-bg border border-border border-r-0 text-[10px] sm:text-xs text-neutral rounded-l px-1.5 sm:px-2 py-1 sm:py-1.5 focus:outline-none disabled:opacity-50"
-            >
-              <option value="60">1m</option>
-            </select>
-            <button
-              onClick={toggleWatch}
-              className={`px-2 sm:px-3 py-1 sm:py-1.5 text-[10px] sm:text-xs font-medium rounded-r border transition-colors ${
-                watching
-                  ? 'bg-emerald-500/20 border-emerald-500/50 text-emerald-400'
-                  : 'bg-surface border-border text-neutral hover:text-white hover:border-accent'
-              }`}
-              title={watching ? 'Stop auto-watch' : 'Start auto-watch'}
-            >
-              {watching ? 'Stop' : 'Auto'}
-            </button>
-          </div>
-
-          {/* Language selector — triggers Google Translate full-page translation */}
-          <select
-            value={language}
-            onChange={e => {
-              const code = e.target.value
-              setLanguage(code)
-              ;(window as any).flashfeedTranslateTo?.(code)
-            }}
-            className="hidden lg:block bg-bg border border-border text-[10px] sm:text-xs text-neutral rounded px-1.5 sm:px-2 py-1 sm:py-1.5 focus:outline-none focus:border-accent"
-            title="Translate entire page"
-          >
-            {LANGUAGES.map(l => (
-              <option key={l.code} value={l.code}>{l.flag} {l.nativeLabel}</option>
-            ))}
-          </select>
-
           <button
-            onClick={() => setShowSentiment(true)}
-            className="hidden xl:inline-flex px-2 sm:px-3 py-1 sm:py-1.5 text-[10px] sm:text-xs font-medium rounded border border-border text-neutral hover:text-white hover:border-accent transition-colors"
+            onClick={toggleWatch}
+            className={`hidden lg:flex px-2 sm:px-3 py-1 sm:py-1.5 text-[10px] sm:text-xs font-medium rounded border transition-colors ${
+              watching
+                ? 'bg-emerald-500/20 border-emerald-500/50 text-emerald-400'
+                : 'bg-surface border-border text-neutral hover:text-white hover:border-accent'
+            }`}
+            title={watching ? 'Stop auto-watch' : 'Start auto-watch (every 60s)'}
           >
-            Sentiment
+            {watching ? 'Stop' : 'Auto'}
           </button>
 
           <div className="hidden sm:flex items-center gap-1 sm:gap-2">
