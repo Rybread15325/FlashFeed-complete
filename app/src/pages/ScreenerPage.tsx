@@ -5,7 +5,31 @@ import { ScreenerTable } from './ScreenerTable'
 import { ScreenerFilterPanel } from './ScreenerFilterPanel'
 import { IntradayChart } from './IntradayChart'
 import { TickerMirror } from './TickerMirror'
+import { OverviewPage } from './OverviewPage'
+import { MomentumPage } from './MomentumPage'
+import { DecisionMapPanel } from './DecisionMapPanel'
+import { PredictionsPage } from './PredictionsPage'
+import { AIPage } from './AIPage'
+import { NewsPage } from './NewsPage'
+import { ChartsPage } from './ChartsPage'
+import { ChartsGridPage } from './ChartsGridPage'
+import SocialPage from './SocialPage'
 import type { Article, ScreenerRow } from '@/lib/types'
+
+type SubTab = 'screener' | 'overview' | 'movers' | 'decisionmap' | 'predicted' | 'conviction' | 'news' | 'performance' | 'technical' | 'sentiment'
+
+const SUB_TABS: { id: SubTab; label: string }[] = [
+  { id: 'screener',    label: 'Screener' },
+  { id: 'overview',   label: 'Overview' },
+  { id: 'movers',     label: 'Top Movers' },
+  { id: 'decisionmap',label: 'Decision Map' },
+  { id: 'predicted',  label: 'Predicted Up Tomorrow' },
+  { id: 'conviction', label: 'High Conviction' },
+  { id: 'news',       label: 'News/Catalysts' },
+  { id: 'performance',label: 'Performance' },
+  { id: 'technical',  label: 'Technical' },
+  { id: 'sentiment',  label: 'Sentiment' },
+]
 
 const fetcher = (url: string) => fetch(url).then(r => r.json())
 
@@ -43,6 +67,7 @@ function compact(n: number | null | undefined) {
 }
 
 export function ScreenerPage() {
+  const [subTab, setSubTab] = useState<SubTab>('screener')
   const [socialWindow, setSocialWindow] = useState('adaptive')
   const screenerParams = new URLSearchParams({ limit: '1500' })
   if (socialWindow !== 'adaptive') screenerParams.set('window_minutes', socialWindow)
@@ -363,8 +388,43 @@ export function ScreenerPage() {
 
   const selectCls = 'bg-bg border border-border rounded px-2 py-1 text-xs text-neutral hover:border-accent/50 focus:outline-none focus:border-accent transition-colors'
 
+  const subContent: Record<Exclude<SubTab, 'screener'>, JSX.Element> = {
+    overview:    <OverviewPage />,
+    movers:      <MomentumPage />,
+    decisionmap: <DecisionMapPanel />,
+    predicted:   <PredictionsPage />,
+    conviction:  <AIPage />,
+    news:        <NewsPage />,
+    performance: <ChartsPage />,
+    technical:   <ChartsGridPage />,
+    sentiment:   <SocialPage />,
+  }
+
   return (
     <div>
+      {/* Sub-tab bar */}
+      <div className="flex items-center gap-1 overflow-x-auto mb-4 border-b border-border pb-0">
+        {SUB_TABS.map(tab => (
+          <button
+            key={tab.id}
+            onClick={() => setSubTab(tab.id)}
+            className={`flex-shrink-0 px-3 py-2 text-xs font-medium border-b-2 -mb-px transition-colors whitespace-nowrap ${
+              subTab === tab.id
+                ? 'text-white border-sky-400'
+                : 'text-neutral border-transparent hover:text-white hover:border-slate-600'
+            }`}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Non-screener sub-views */}
+      {subTab !== 'screener' && subContent[subTab]}
+
+      {/* Screener content */}
+      {subTab === 'screener' && <>
+
       {/* Finviz-style compact toolbar */}
       <div className="flex items-center gap-1.5 flex-wrap mb-3 bg-surface border border-border rounded-lg px-3 py-2">
         <select
@@ -679,6 +739,8 @@ export function ScreenerPage() {
           })()}
         </div>
       )}
+
+      </>}
     </div>
   )
 }
