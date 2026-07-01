@@ -5,6 +5,7 @@ export interface Article {
   source:         string
   category?:      string | null
   publish_date:   number
+  fetched_date?:  number | null
   ticker?:        string | null
   company?:       string | null
   sentiment?:     'bullish' | 'bearish' | 'neutral' | null
@@ -120,6 +121,7 @@ export interface MomentumRow {
   discovery_source?: string
   positive_mover?:   boolean
   finviz_rank?:      number
+  exchange?:         string
   latest_social?:    number | null
   ai_numeric_rank?:   number
   trade_watch?: {

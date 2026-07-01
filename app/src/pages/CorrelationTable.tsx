@@ -14,7 +14,7 @@ export function CorrelationTable({ entries }: Props) {
     if (typeof av === 'string' || typeof bv === 'string') {
       return sort.dir === 'desc' ? String(bv).localeCompare(String(av)) : String(av).localeCompare(String(bv))
     }
-    return sort.dir === 'desc' ? bv - av : av - bv
+    return sort.dir === 'desc' ? Number(bv) - Number(av) : Number(av) - Number(bv)
   })
 
   return (

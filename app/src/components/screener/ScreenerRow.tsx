@@ -62,26 +62,26 @@ export function ScreenerRow({ row, columns }: Props) {
       case 'avg_sentiment':
         return (
           <div className="flex items-center gap-1.5">
-            <span className={clsx('font-mono', row.avg_sentiment >= 0.2 ? 'text-emerald-400' : row.avg_sentiment <= -0.2 ? 'text-red-400' : 'text-neutral')}>
-              {row.avg_sentiment.toFixed(2)}
+            <span className={clsx('font-mono', (row.avg_sentiment ?? 0) >= 0.2 ? 'text-emerald-400' : (row.avg_sentiment ?? 0) <= -0.2 ? 'text-red-400' : 'text-neutral')}>
+              {(row.avg_sentiment ?? 0).toFixed(2)}
             </span>
-            {sentBar(row.bullish_count, row.bearish_count, row.neutral_count)}
+            {sentBar(row.bullish_count ?? 0, row.bearish_count ?? 0, row.neutral_count ?? 0)}
           </div>
         )
       case 'social_sentiment':
         return (
-          <span className={clsx('font-mono', row.social_sentiment >= 0.2 ? 'text-emerald-400' : row.social_sentiment <= -0.2 ? 'text-red-400' : 'text-neutral')}>
-            {row.social_sentiment.toFixed(2)}
+          <span className={clsx('font-mono', (row.social_sentiment ?? 0) >= 0.2 ? 'text-emerald-400' : (row.social_sentiment ?? 0) <= -0.2 ? 'text-red-400' : 'text-neutral')}>
+            {(row.social_sentiment ?? 0).toFixed(2)}
           </span>
         )
       case 'structured_sentiment':
         return (
-          <span className={clsx('font-mono', row.structured_sentiment >= 0.2 ? 'text-emerald-400' : row.structured_sentiment <= -0.2 ? 'text-red-400' : 'text-neutral')}>
-            {row.structured_sentiment.toFixed(2)}
+          <span className={clsx('font-mono', (row.structured_sentiment ?? 0) >= 0.2 ? 'text-emerald-400' : (row.structured_sentiment ?? 0) <= -0.2 ? 'text-red-400' : 'text-neutral')}>
+            {(row.structured_sentiment ?? 0).toFixed(2)}
           </span>
         )
       case 'message_count':
-        return <span className="font-mono text-neutral">{row.message_count}</span>
+        return <span className="font-mono text-neutral">{row.message_count ?? 0}</span>
       case 'news_article_count':
         return <span className="font-mono text-neutral">{row.news_article_count ?? 0}</span>
       case 'bullish_count':

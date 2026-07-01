@@ -279,7 +279,7 @@ export function OverviewPage() {
                 </div>
                 <div className="text-xs text-slate-200 line-clamp-2">{row.title || 'Untitled headline'}</div>
                 <div className="text-[10px] text-neutral mt-1 truncate">
-                  {(row.event_type || 'general_news').replaceAll('_', ' ')} · {row.reason || row.source || 'No event phrase matched'}
+                  {(row.event_type || 'general_news').replace(/_/g, ' ')} · {row.reason || row.source || 'No event phrase matched'}
                 </div>
               </div>
             )) : (

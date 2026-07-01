@@ -1,5 +1,5 @@
 import type { Article } from '@/lib/types'
-import { SentimentBadge } from './SentimentBadge'
+import { SentimentBadge } from '@/components/shared/SentimentBadge'
 import { clsx } from 'clsx'
 
 function formatTime(ts: number | null): string {

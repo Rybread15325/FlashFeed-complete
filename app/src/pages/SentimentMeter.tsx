@@ -13,8 +13,8 @@ export function SentimentMeter({ row }: { row: ScreenerRow }) {
         <div style={{ width: `${neutPct}%` }} className="bg-slate-500" />
         <div style={{ width: `${bearPct}%` }} className="bg-red-500" />
       </div>
-      <span className={`text-xs font-mono ${row.avg_sentiment >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-        {row.avg_sentiment >= 0 ? '+' : ''}{row.avg_sentiment.toFixed(2)}
+      <span className={`text-xs font-mono ${(row.avg_sentiment ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+        {(row.avg_sentiment ?? 0) >= 0 ? '+' : ''}{(row.avg_sentiment ?? 0).toFixed(2)}
       </span>
     </div>
   )
