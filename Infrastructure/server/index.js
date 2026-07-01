@@ -4644,23 +4644,24 @@ app.get('/api/health', async (req, res) => {
 })
 
 app.get('/api/kafka/status', async (req, res) => {
-  const configured = !!process.env.KAFKA_BOOTSTRAP_SERVERS
+  const connected = redisReady()
+  let streamLen = 0
   let eventsRecent = 0
   try {
+    if (connected) {
+      streamLen = await redis.xlen('flashfeed:news').catch(() => 0)
+    }
     if (mongoose.connection.db) {
       const cutoff = Math.floor(Date.now() / 1000) - 3600
-      eventsRecent = await mongoose.connection.db.collection('events').countDocuments({ timestamp: { $gte: new Date(cutoff * 1000) } })
+      eventsRecent = await mongoose.connection.db.collection('socials').countDocuments({ detected_at: { $gte: cutoff } }).catch(() => 0)
     }
   } catch {}
   res.json({
-    ok: configured,
-    configured,
-    broker: configured ? (process.env.KAFKA_BOOTSTRAP_SERVERS || '').replace(/:\/\/[^@]*@/, '://***@') : null,
-    topic: process.env.KAFKA_TOPIC || 'flashfeed-events',
-    group_id: process.env.KAFKA_GROUP_ID || 'flashfeed-consumer-group',
-    events_last_hour: eventsRecent,
-    consumer_service: 'Infrastructure/kafka/consumer.py',
-    status: configured ? 'configured' : 'not_configured — set KAFKA_BOOTSTRAP_SERVERS in Railway env vars (get free broker at upstash.com/kafka)',
+    ok: connected,
+    configured: connected,
+    topic: 'flashfeed:news (Redis Stream)',
+    events_last_hour: eventsRecent || streamLen,
+    status: connected ? 'connected' : 'redis not connected — add REDIS_URL in Railway env vars',
   })
 })
 

@@ -240,11 +240,11 @@ export function TopBar() {
             {fetching ? 'Fetching...' : cooldownRemaining > 0 ? `Fetch ${cooldownRemaining}s` : 'Run Now'}
           </button>
 
-          {/* Kafka stream indicator — sits between RAM fetch and disk save */}
+          {/* Redis Stream indicator */}
           <div
             title={kafkaStatus?.configured
-              ? `Kafka stream active · topic: ${kafkaStatus.topic} · ${kafkaStatus.events_last_hour ?? 0} events/hr`
-              : 'Kafka not configured — add KAFKA_BOOTSTRAP_SERVERS in Railway env vars (free broker at upstash.com/kafka)'}
+              ? `Redis Stream active · ${kafkaStatus.events_last_hour ?? 0} events/hr`
+              : 'Redis not connected — add REDIS_URL in Railway env vars'}
             className={`hidden md:flex items-center gap-1.5 px-3 py-1.5 border text-xs font-medium rounded transition-colors whitespace-nowrap select-none ${
               kafkaStatus?.configured
                 ? 'bg-emerald-500/10 border-emerald-500/40 text-emerald-400'
@@ -255,8 +255,8 @@ export function TopBar() {
               <path d="M22 12h-4l-3 9L9 3l-3 9H2"/>
             </svg>
             {kafkaStatus?.configured
-              ? `Kafka · ${kafkaStatus.events_last_hour ?? 0}/hr`
-              : 'Kafka ✗'}
+              ? `Stream · ${kafkaStatus.events_last_hour ?? 0}/hr`
+              : 'Stream ✗'}
           </div>
 
           <button
