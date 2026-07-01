@@ -162,7 +162,7 @@ function normalizeScreenerRow(doc = {}) {
     operating_margin: nullableNumber(doc.operating_margin),
     roe: nullableNumber(doc.roe),
     debt_equity: nullableNumber(doc.debt_equity),
-    beta: nullableNumber(doc.beta),
+    beta: nullableNumber(doc.beta ?? doc.beta_1_year),
     rsi: nullableNumber(doc.rsi),
     sma20: nullableNumber(doc.sma20),
     sma50: nullableNumber(doc.sma50),
@@ -175,17 +175,44 @@ function normalizeScreenerRow(doc = {}) {
     perf_ytd: nullableNumber(doc.perf_ytd),
     atr: nullableNumber(doc.atr),
     gap: nullableNumber(doc.gap),
-    analyst: doc.analyst || null,
-    target_price: nullableFixed(doc.target_price, 2),
+    analyst: doc.analyst || analystRecToLabel(doc.analyst_recom) || null,
+    target_price: nullableFixed(doc.target_price ?? doc.targetMeanPrice ?? doc.targetMedianPrice, 2),
     inst_own: nullableNumber(doc.inst_own),
     insider_own: nullableNumber(doc.insider_own),
-    float_short: nullableNumber(doc.float_short),
+    float_short: nullableNumber(doc.float_short ?? (doc.shortPercentOfFloat != null ? doc.shortPercentOfFloat * 100 : null)),
     earnings_date: doc.earnings_date || null,
     previous_close: nullableFixed(doc.previous_close, 2),
     quote_source: doc.quote_source || null,
     quote_updated_at: doc.quote_updated_at || null,
     quote_status: doc.quote_status || (hasStoredPrice ? 'priced' : 'missing'),
+    high_52w: nullableNumber(doc.high_52w ?? doc.week_52_high ?? doc['52W High'] ?? doc['52w_high'] ?? doc.week52High ?? doc.fiftyTwoWeekHigh),
+    low_52w:  nullableNumber(doc.low_52w  ?? doc.week_52_low  ?? doc['52W Low']  ?? doc['52w_low']  ?? doc.week52Low  ?? doc.fiftyTwoWeekLow),
   }
+}
+
+function analystRecToLabel(rec) {
+  if (rec == null) return null
+  const n = Number(rec)
+  if (!Number.isFinite(n)) return null
+  if (n >= 0.75)  return 'Buy'
+  if (n >= 0.1)   return 'Hold'
+  if (n >= -0.1)  return 'Hold'
+  if (n >= -0.75) return 'Sell'
+  return 'Strong Sell'
+}
+
+async function loadYfinanceEnrichMap(db, tickers) {
+  if (!tickers || !tickers.length) return new Map()
+  try {
+    const docs = await db.collection('finviz_screener').find(
+      { ticker: { $in: tickers } },
+      { projection: { ticker: 1, high_52w: 1, low_52w: 1, week_52_high: 1, week_52_low: 1,
+          fiftyTwoWeekHigh: 1, fiftyTwoWeekLow: 1, beta: 1, beta_1_year: 1,
+          analyst: 1, analyst_recom: 1, target_price: 1, targetMeanPrice: 1,
+          float_short: 1, shortPercentOfFloat: 1, earnings_date: 1, pe_ratio: 1, pe: 1 } }
+    ).toArray()
+    return new Map(docs.map(d => [String(d.ticker || '').toUpperCase(), d]))
+  } catch { return new Map() }
 }
 
 function socialTimeStages() {
@@ -610,11 +637,29 @@ router.get('/', async (req, res) => {
 
     if (mongoose.connection.db && data.length) {
       const tickers = data.map(row => row.ticker)
-      const [articleMap, socialMap, headlineMap] = await Promise.all([
+      const [articleMap, socialMap, headlineMap, yfinanceMap] = await Promise.all([
         loadArticleStatsForTickers(mongoose.connection.db, tickers, Number(days || 2)),
         loadAdaptiveSocialStatsForRows(mongoose.connection.db, data, windowOverride),
         loadLatestHeadlinesForTickers(mongoose.connection.db, tickers),
+        loadYfinanceEnrichMap(mongoose.connection.db, tickers),
       ])
+      // Merge yfinance enrichment (fills in 52W range, beta, analyst, target, float_short)
+      data = data.map(row => {
+        const yf = yfinanceMap.get(row.ticker)
+        if (!yf) return row
+        const fill = (current, ...candidates) => current != null ? current : candidates.find(v => v != null) ?? null
+        return {
+          ...row,
+          high_52w:     fill(row.high_52w,     nullableNumber(yf.high_52w ?? yf.week_52_high ?? yf.fiftyTwoWeekHigh)),
+          low_52w:      fill(row.low_52w,      nullableNumber(yf.low_52w  ?? yf.week_52_low  ?? yf.fiftyTwoWeekLow)),
+          beta:         fill(row.beta,         nullableNumber(yf.beta ?? yf.beta_1_year)),
+          analyst:      fill(row.analyst,      yf.analyst || analystRecToLabel(yf.analyst_recom)),
+          target_price: fill(row.target_price, nullableNumber(yf.target_price ?? yf.targetMeanPrice)),
+          float_short:  fill(row.float_short,  yf.shortPercentOfFloat != null ? yf.shortPercentOfFloat * 100 : nullableNumber(yf.float_short)),
+          earnings_date:fill(row.earnings_date,yf.earnings_date),
+          pe_ratio:     fill(row.pe_ratio,     nullableNumber(yf.pe_ratio ?? yf.pe)),
+        }
+      })
       data = data.map(row => enrichScreenerRow(row, articleMap.get(row.ticker), socialMap.get(row.ticker), headlineMap.get(row.ticker), windowOverride))
       // Sort: rows with fresh articles first, then by article count, then ticker
       data.sort((a, b) => {
