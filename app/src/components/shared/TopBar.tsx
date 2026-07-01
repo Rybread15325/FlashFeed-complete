@@ -14,16 +14,15 @@ const LAST_FETCH_KEY = 'flashfeed:lastFetchAt'
 
 const NAV = [
   { href: '/overview', label: 'Overview' },
-  { href: '/momentum', label: 'Top Movers' },
-  { href: '/decision-map', label: 'Decision Map' },
-  { href: '/predictions', label: 'Predicted Up' },
-  { href: '/ai', label: 'High Conviction' },
+  { href: '/ai', label: 'AI' },
   { href: '/news', label: 'News' },
+  { href: '/screener', label: 'Screener' },
+  { href: '/social', label: 'Social' },
   { href: '/charts', label: 'Charts' },
   { href: '/charts-grid', label: 'Charts Grid' },
-  { href: '/social', label: 'Social' },
-  { href: '/screener', label: 'Screener' },
+  { href: '/momentum', label: 'Momentum' },
   { href: '/correlation', label: 'Correlation' },
+  { href: '/decision-map', label: 'Decision Map' },
   { href: '/settings', label: 'Settings' },
 ]
 
