@@ -12,6 +12,7 @@ import { ChartsGridPage }  from './pages/ChartsGridPage'
 import { MomentumPage }    from './pages/MomentumPage'
 import { CorrelationPage } from './pages/CorrelationPage'
 import { SettingsPage }    from './pages/SettingsPage'
+import { DecisionMapPanel } from './pages/DecisionMapPanel'
 import { LanguageContext, getStoredLanguage, storeLanguage } from './lib/language'
 
 export default function App() {
@@ -42,8 +43,9 @@ export default function App() {
             <Route path="/charts"      element={<ChartsPage />} />
             <Route path="/charts-grid" element={<ChartsGridPage />} />
             <Route path="/momentum"    element={<MomentumPage />} />
-            <Route path="/correlation" element={<CorrelationPage />} />
-            <Route path="/settings"    element={<SettingsPage />} />
+            <Route path="/correlation"   element={<CorrelationPage />} />
+            <Route path="/decision-map" element={<DecisionMapPanel />} />
+            <Route path="/settings"     element={<SettingsPage />} />
           </Routes>
         </AppShell>
       </LanguageContext.Provider>

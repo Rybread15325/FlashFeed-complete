@@ -22,6 +22,7 @@ const NAV = [
   { href: '/charts-grid', label: 'Charts Grid' },
   { href: '/momentum', label: 'Momentum' },
   { href: '/correlation', label: 'Correlation' },
+  { href: '/decision-map', label: 'Decision Map' },
   { href: '/settings', label: 'Settings' },
 ]
 

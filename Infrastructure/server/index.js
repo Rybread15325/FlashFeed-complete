@@ -14,6 +14,7 @@ import screenerRouter    from './routes/screener.js'
 import socialRouter      from './routes/social.js'
 import correlationRouter from './routes/correlation.js'
 import settingsRouter    from './routes/settings.js'
+import decisionMapRouter from './routes/decisionMap.js'
 
 const app  = express()
 const PORT = process.env.PORT || 3001
@@ -59,6 +60,7 @@ const TRACKED_MARKETS = [
   ...TRACKED_MARKET_INDICES,
 ]
 const MAX_SIGNAL_CHANGE_PCT = Math.max(10, Number(process.env.MAX_SIGNAL_CHANGE_PCT || 300))
+const MIN_LIVE_MODEL_CONFIDENCE = Math.max(0, Math.min(1, Number(process.env.MIN_LIVE_MODEL_CONFIDENCE || 0.05)))
 const PRIVATE_TRACKED_TICKERS = new Set(['SPACEX'])
 
 // ── Middleware ────────────────────────────────────────────
@@ -277,6 +279,267 @@ app.get('/api/ai/overview', async (req, res) => {
     })
   } catch (e) {
     res.status(500).json({ error: e.message })
+  }
+})
+
+app.get('/api/ai/rankings', async (req, res) => {
+  try {
+    const db = mongoose.connection.db
+    if (!db) return res.status(503).json({ ok: false, rows: [], error: 'MongoDB not connected' })
+    const days = Math.min(14, Math.max(1, Number(req.query.days) || 3))
+    const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 50))
+    const socialWindow = Math.min(4320, Math.max(5, Number(req.query.window_minutes) || 1440))
+    const minScore = Math.max(0, Math.min(100, Number(req.query.min_score) || 0))
+    const [arts, tradeRows, model, signalRows] = await Promise.all([
+      aiRecentArticles(db, days),
+      loadEnrichedTradeWatchRows(db, { limit: Math.max(limit, 30), days, socialWindow }),
+      loadLatestPredictionModel(db),
+      db.collection('prediction_signals').find({}, { projection: { ticker: 1, signal_sec: 1, decision: 1, baseline_signal: 1, model_signal: 1, label_status: 1, labels: 1 } }).sort({ signal_sec: -1 }).limit(500).toArray().catch(() => []),
+    ])
+    const newsMap = aiScoreTickers(arts)
+    const latestSignalByTicker = new Map()
+    for (const row of signalRows) {
+      const ticker = String(row.ticker || '').toUpperCase()
+      if (ticker && !latestSignalByTicker.has(ticker)) latestSignalByTicker.set(ticker, row)
+    }
+    const rows = tradeRows.map((row, index) => {
+      const ticker = String(row.ticker || '').toUpperCase()
+      const news = newsMap.get(ticker) || { sum: 0, n: 0, pos: 0, neg: 0 }
+      const newsAvg = news.n ? news.sum / news.n : Number(row.article_sentiment || 0)
+      const newsScore = clamp((newsAvg + 1) / 2)
+      const tradeScore = Number(row.trade_watch?.trade_watch_score || 0)
+      const socialCount = Number(row.message_count || 0)
+      const articleCount = Number(row.article_count || 0)
+      const evidenceScore = Number(row.trade_watch?.evidence_score || 0)
+      const socialDensity = clamp(Math.log1p(socialCount) / Math.log1p(80))
+      const features = predictionFeaturesFromMover(row, socialWindow)
+      const modelSignal = applyPredictionModel(features, model)
+      const baselineSignal = baselinePredictionFromMover(row)
+      const storedSignal = latestSignalByTicker.get(ticker)
+      const storedModelSignal = storedSignal?.model_signal
+      const usableModelSignal = isLiveModelSignalEligible(modelSignal, model) ? modelSignal : null
+      const usableStoredModelSignal = isLiveModelSignalEligible(storedModelSignal, model) ? storedModelSignal : null
+      const activeSignal = usableModelSignal || usableStoredModelSignal || storedSignal?.baseline_signal || baselineSignal
+      const probabilityUp = Number(activeSignal?.probability_up)
+      const modelDirectionBoost = activeSignal?.direction === 'up' ? 0.08 : activeSignal?.direction === 'down' ? -0.08 : 0
+      const predictionScore = Number.isFinite(probabilityUp) ? clamp(probabilityUp) : activeSignal?.direction === 'up' ? 0.62 : activeSignal?.direction === 'down' ? 0.38 : 0.5
+      const quoteFreshness = Number(row.trade_watch?.quote_freshness ?? 0.5)
+      const correlationScore = clamp(Number(features.correlation_score || 0), -1, 1)
+      const validationAccuracy = Number(features.prediction_validation_accuracy_5m)
+      const validationReturn = Number(features.prediction_validation_avg_return_5m)
+      const validationEdge = clamp(
+        (Number.isFinite(validationAccuracy) ? Math.max(0, validationAccuracy - 0.5) * 1.6 : 0) +
+        (Number.isFinite(validationReturn) ? Math.max(0, validationReturn) / 3 : 0),
+        0, 1
+      )
+      const positiveCatalyst = Boolean(
+        (articleCount > 0 && newsAvg > 0.05) || (socialCount > 0 && Number(row.social_sentiment || 0) > 0.08) ||
+        correlationScore > 0.12 || validationEdge > 0.10 || Number(features.is_news_catalyst || 0) === 1
+      )
+      const technicalConfirmation = positiveCatalyst ? clamp(
+        (Number(features.rsi || 50) >= 38 && Number(features.rsi || 50) <= 68 ? 0.35 : 0) +
+        (Number(features.rsi_oversold || 0) * 0.20) +
+        (Number(row.change_pct || 0) >= -4 && Number(row.change_pct || 0) <= 12 ? 0.20 : 0) +
+        (Number(row.rel_volume || 0) >= 1.25 ? 0.25 : 0), 0, 1
+      ) : 0
+      const blended = clamp(
+        tradeScore * 0.22 + newsScore * 0.18 + evidenceScore * 0.14 + socialDensity * 0.08 +
+        predictionScore * 0.16 + quoteFreshness * 0.05 + ((correlationScore + 1) / 2) * 0.08 +
+        validationEdge * 0.05 + technicalConfirmation * 0.04 + modelDirectionBoost
+      )
+      const aiRankScore = Number((blended * 100).toFixed(1))
+      const direction = aiRankScore >= 68 && Number(row.change_pct || 0) >= 0 ? 'bullish' : aiRankScore <= 38 || activeSignal?.direction === 'down' ? 'bearish' : 'watch'
+      return {
+        rank_seed: index + 1, ticker, company: row.company || '', price: row.price ?? null,
+        change_pct: Number(row.change_pct || 0), rel_volume: Number(row.rel_volume || 0), volume: Number(row.volume || 0),
+        ai_rank_score: aiRankScore, direction, confidence: Number(Math.abs(blended - 0.5).toFixed(3)),
+        trade_watch_score: Number(tradeScore.toFixed(3)), prediction_signal: activeSignal || null,
+        model_ready: Boolean(modelSignal),
+        evidence: {
+          news_score: Number((newsAvg * 100).toFixed(1)), news_articles: articleCount,
+          scored_news_articles: Number(news.n || 0), bullish_news: Number(news.pos || 0), bearish_news: Number(news.neg || 0),
+          social_posts: socialCount, social_sentiment: Number(Number(row.social_sentiment || 0).toFixed(3)),
+          evidence_score: Number(evidenceScore.toFixed(3)), agreement: Number(row.trade_watch?.agreement || 0),
+          quote_age_minutes: row.trade_watch?.quote_age_minutes ?? null, latest_signal_status: storedSignal?.label_status || null,
+        },
+        reasons: row.trade_watch?.reasons || [], risks: row.trade_watch?.risks || [],
+      }
+    })
+      .filter(row => row.ticker && row.ai_rank_score >= minScore)
+      .sort((a, b) => b.ai_rank_score - a.ai_rank_score || b.evidence.news_articles - a.evidence.news_articles)
+      .slice(0, limit)
+      .map((row, index) => ({ ...row, rank: index + 1 }))
+    const modelValidation = modelValidationState(model)
+    res.json({
+      ok: true, generated_at: new Date().toISOString(),
+      model: {
+        name: model?.model_id || PREDICTION_MODEL_ID, status: model?.status || 'baseline',
+        samples: Number(model?.samples || 0), min_samples: model?.min_samples || Number(process.env.PREDICTION_MIN_TRAINING_SAMPLES || 20),
+        metrics: model?.metrics || null, validation_status: modelValidation.status, validation_edge: modelValidation.edge,
+        live_classifier_enabled: modelValidation.allow_live_classifier, live_classifier_reason: modelValidation.reason,
+        fallback: 'baseline_trade_watch_v1',
+      },
+      methodology: {
+        ranking: 'blended Trade Watch, rolling news sentiment, social density, quote freshness, correlation, gated technical confirmation, and validated prediction signal',
+        scaling: 'server-side capped and cached; no browser-side scan of Mongo collections',
+        provider_dependency: 'none on read path; uses stored validated model when it beats baseline, otherwise shadows it and falls back to baseline/transparent evidence',
+      },
+      summary: {
+        rows: rows.length, article_window_days: days, scored_articles: arts.length,
+        social_window_minutes: socialWindow, bullish: rows.filter(r => r.direction === 'bullish').length,
+        bearish: rows.filter(r => r.direction === 'bearish').length, watch: rows.filter(r => r.direction === 'watch').length,
+        model_status: model?.status || 'baseline', model_samples: Number(model?.samples || 0),
+      },
+      rows,
+    })
+  } catch (err) {
+    console.error('GET /api/ai/rankings failed:', err)
+    res.status(500).json({ ok: false, rows: [], error: String(err.message || err) })
+  }
+})
+
+app.get('/api/ai/ticker/:ticker', async (req, res) => {
+  try {
+    const db = mongoose.connection.db
+    if (!db) return res.status(503).json({ ok: false, error: 'MongoDB not connected' })
+    const ticker = String(req.params.ticker || '').toUpperCase().replace(/[^A-Z0-9.-]/g, '')
+    if (!ticker) return res.status(400).json({ ok: false, error: 'Ticker is required' })
+    const days = Math.min(14, Math.max(1, Number(req.query.days) || 3))
+    const socialWindow = Math.min(4320, Math.max(5, Number(req.query.window_minutes) || 1440))
+    const sinceSocialSec = Math.floor(Date.now() / 1000) - socialWindow * 60
+    const tickerRegex = `(^|,\\s*)${escapeRegExp(ticker)}(\\s*,|$)`
+    const articleMatch = {
+      ...recentArticleMatch(days),
+      ...approvedNewsSourceMongoFilter('source'),
+      $or: [
+        { ticker: { $regex: tickerRegex, $options: 'i' } },
+        { tickers: ticker },
+        { tickers_mentioned: ticker },
+      ],
+    }
+    const [movers, arts, model, articles, articleCount, socialRows, predictionRows] = await Promise.all([
+      loadPositiveFinvizMoverRows(db, 200),
+      aiRecentArticles(db, days),
+      loadLatestPredictionModel(db),
+      db.collection('articles').find(articleMatch, {
+        projection: { title: 1, source: 1, sentiment: 1, sentiment_score: 1, event_type: 1, sentiment_reason: 1, publish_date: 1, fetched_date: 1, detected_at: 1, url: 1 },
+      }).sort({ publish_date: -1, fetched_date: -1, detected_at: -1 }).limit(20).toArray(),
+      db.collection('articles').countDocuments(articleMatch),
+      db.collection('socials').aggregate([
+        ...socialTimeStages(),
+        { $match: { _event_sec: { $gte: sinceSocialSec }, _ticker_candidates: ticker } },
+        { $sort: { _event_sec: -1 } }, { $limit: 20 },
+        { $project: { _id: 0, platform: '$_norm_platform', author: 1, text: { $ifNull: ['$text', { $ifNull: ['$content', '$title'] }] }, sentiment: 1, sentiment_score: 1, url: 1, event_sec: '$_event_sec' } },
+      ]).toArray(),
+      db.collection('prediction_signals').find({ ticker }, {
+        projection: { _id: 0, signal_id: 1, signal_sec: 1, decision: 1, baseline_signal: 1, model_signal: 1, label_status: 1, labels: 1, rank: 1 },
+      }).sort({ signal_sec: -1 }).limit(20).toArray(),
+    ])
+    const mover = movers.find(row => String(row.ticker || '').toUpperCase() === ticker)
+    const [articleMap, socialMap] = await Promise.all([
+      loadArticleStatsForTickers(db, [ticker], days),
+      loadSocialStatsForTickers(db, [ticker], socialWindow),
+    ])
+    const enriched = mover ? addTradeWatchFields(mergeMoverContext(mover, articleMap.get(ticker), socialMap.get(ticker))) : null
+    const news = aiScoreTickers(arts).get(ticker) || { sum: 0, n: 0, pos: 0, neg: 0 }
+    const newsAvg = news.n ? news.sum / news.n : Number(enriched?.article_sentiment || 0)
+    const features = enriched ? predictionFeaturesFromMover(enriched, socialWindow) : {}
+    const modelSignal = enriched ? applyPredictionModel(features, model) : null
+    const baselineSignal = enriched ? baselinePredictionFromMover(enriched) : null
+    const storedModelSignal = predictionRows[0]?.model_signal
+    const usableModelSignal = isLiveModelSignalEligible(modelSignal, model) ? modelSignal : null
+    const usableStoredModelSignal = isLiveModelSignalEligible(storedModelSignal, model) ? storedModelSignal : null
+    const activeSignal = usableModelSignal || usableStoredModelSignal || predictionRows[0]?.baseline_signal || baselineSignal
+    const socialCount = Number(enriched?.message_count || 0)
+    const articleTotal = Number(enriched?.article_count || 0)
+    const evidenceScore = Number(enriched?.trade_watch?.evidence_score || 0)
+    const tradeScore = Number(enriched?.trade_watch?.trade_watch_score || 0)
+    const predictionScore = Number.isFinite(Number(activeSignal?.probability_up)) ? clamp(Number(activeSignal.probability_up)) : activeSignal?.direction === 'up' ? 0.62 : activeSignal?.direction === 'down' ? 0.38 : 0.5
+    const newsScore = clamp((newsAvg + 1) / 2)
+    const socialDensity = clamp(Math.log1p(socialCount) / Math.log1p(80))
+    const quoteFreshness = Number(enriched?.trade_watch?.quote_freshness ?? 0.5)
+    const correlationScore = clamp(Number(features.correlation_score || 0), -1, 1)
+    const validationAccuracy = Number(features.prediction_validation_accuracy_5m)
+    const validationReturn = Number(features.prediction_validation_avg_return_5m)
+    const validationEdge = clamp(
+      (Number.isFinite(validationAccuracy) ? Math.max(0, validationAccuracy - 0.5) * 1.6 : 0) +
+      (Number.isFinite(validationReturn) ? Math.max(0, validationReturn) / 3 : 0), 0, 1
+    )
+    const positiveCatalyst = Boolean(
+      (articleTotal > 0 && newsAvg > 0.05) || (socialCount > 0 && Number(enriched?.social_sentiment || 0) > 0.08) ||
+      correlationScore > 0.12 || validationEdge > 0.10 || Number(features.is_news_catalyst || 0) === 1
+    )
+    const technicalConfirmation = positiveCatalyst ? clamp(
+      (Number(features.rsi || 50) >= 38 && Number(features.rsi || 50) <= 68 ? 0.35 : 0) +
+      (Number(features.rsi_oversold || 0) * 0.20) +
+      (Number(enriched?.change_pct || 0) >= -4 && Number(enriched?.change_pct || 0) <= 12 ? 0.20 : 0) +
+      (Number(enriched?.rel_volume || 0) >= 1.25 ? 0.25 : 0), 0, 1
+    ) : 0
+    const blended = enriched ? clamp(
+      tradeScore * 0.22 + newsScore * 0.18 + evidenceScore * 0.14 + socialDensity * 0.08 +
+      predictionScore * 0.16 + quoteFreshness * 0.05 + ((correlationScore + 1) / 2) * 0.08 +
+      validationEdge * 0.05 + technicalConfirmation * 0.04 +
+      (activeSignal?.direction === 'up' ? 0.08 : activeSignal?.direction === 'down' ? -0.08 : 0)
+    ) : 0
+    const aiRankScore = Number((blended * 100).toFixed(1))
+    const labeledSignals = predictionRows.filter(r => r.label_status && r.label_status !== 'pending')
+    const completeSignals = predictionRows.filter(r => r.label_status === 'complete')
+    const correct5 = predictionRows.map(r => r.labels?.return_5m?.direction_correct).filter(v => v === true || v === false)
+    const accuracy5m = correct5.length ? Number((correct5.filter(Boolean).length / correct5.length).toFixed(3)) : null
+    const modelValidation = modelValidationState(model)
+    const checks = [
+      { label: 'Ticker in Finviz mover universe', status: mover ? 'pass' : 'warn', detail: mover ? 'Ticker is present in the latest Finviz positive mover set.' : 'Ticker is not in the current Finviz positive mover set.' },
+      { label: 'News evidence window', status: articleCount > 0 ? 'pass' : 'warn', detail: `${articleCount} approved articles found in the last ${days} day(s).` },
+      { label: 'Social evidence window', status: socialCount > 0 ? 'pass' : 'warn', detail: `${socialCount} social posts found in the selected ${socialWindow} minute window.` },
+      { label: 'Prediction validation', status: correct5.length >= 20 ? 'pass' : correct5.length ? 'warn' : 'info', detail: correct5.length ? `${correct5.length} labeled 5m outcomes; accuracy ${Math.round((accuracy5m || 0) * 100)}%.` : 'No completed 5m labels yet; ranking uses current model/baseline signal.' },
+      { label: 'Model validation set', status: modelValidation.allow_live_classifier ? 'pass' : Number(model?.metrics?.baseline_actionable_samples || 0) > 0 ? 'warn' : 'info', detail: `Live classifier: ${modelValidation.allow_live_classifier ? 'enabled' : `shadowed (${modelValidation.reason})`}.` },
+    ]
+    res.json({
+      ok: true, ticker, days, social_window_minutes: socialWindow,
+      score: {
+        ai_rank_score: aiRankScore,
+        direction: aiRankScore >= 68 && Number(enriched?.change_pct || 0) >= 0 ? 'bullish' : aiRankScore <= 38 ? 'bearish' : 'watch',
+        trade_watch_score: Number(tradeScore.toFixed(3)), news_score: Number((newsAvg * 100).toFixed(1)),
+        evidence_score: Number(evidenceScore.toFixed(3)), social_density_score: Number(socialDensity.toFixed(3)),
+        prediction_score: Number(predictionScore.toFixed(3)), quote_freshness: Number(quoteFreshness.toFixed(3)),
+      },
+      mover: enriched ? {
+        ticker, company: enriched.company || '', price: enriched.price ?? null,
+        change_pct: Number(enriched.change_pct || 0), rel_volume: Number(enriched.rel_volume || 0),
+        quote_age_minutes: enriched.trade_watch?.quote_age_minutes ?? null,
+        reasons: enriched.trade_watch?.reasons || [], risks: enriched.trade_watch?.risks || [],
+      } : null,
+      evidence: {
+        article_count: articleTotal, approved_article_count: articleCount, scored_news_articles: Number(news.n || 0),
+        bullish_news: Number(news.pos || 0), bearish_news: Number(news.neg || 0),
+        social_posts: socialCount, social_sentiment: Number(Number(enriched?.social_sentiment || 0).toFixed(3)),
+      },
+      prediction: {
+        active_signal: activeSignal || null, model_signal: modelSignal, baseline_signal: baselineSignal,
+        model: model ? { status: model.status, samples: Number(model.samples || 0), metrics: model.metrics || null, updated_at: model.updated_at || null } : null,
+        signals: predictionRows.map(r => ({
+          signal_id: r.signal_id, signal_sec: r.signal_sec, time: timeLabel(r.signal_sec),
+          decision: r.decision, rank: r.rank, label_status: r.label_status || 'pending',
+          model_signal: r.model_signal || null, baseline_signal: r.baseline_signal || null, labels: r.labels || {},
+        })),
+        summary: { total: predictionRows.length, labeled: labeledSignals.length, complete: completeSignals.length, accuracy_5m: accuracy5m },
+      },
+      articles: articles.map(a => ({
+        title: a.title || '', source: a.source || '', sentiment: a.sentiment || 'neutral',
+        sentiment_score: Number(articleSentimentValue(a).toFixed(3)), event_type: a.event_type || 'general_news',
+        reason: a.sentiment_reason || '', url: a.url || '',
+        time: timeLabel(a.publish_date || a.fetched_date || a.detected_at),
+      })),
+      social_posts: socialRows.map(p => ({
+        platform: p.platform || 'social', author: p.author || '', text: p.text || '',
+        sentiment: typeof p.sentiment_score === 'number' ? Number(p.sentiment_score.toFixed(3)) : sentimentDirectionValue(p.sentiment),
+        url: p.url || '', time: timeLabel(p.event_sec),
+      })),
+      checks,
+    })
+  } catch (err) {
+    console.error('GET /api/ai/ticker/:ticker failed:', err)
+    res.status(500).json({ ok: false, error: String(err.message || err) })
   }
 })
 
@@ -1776,6 +2039,45 @@ function applyPredictionModel(features = {}, model = null) {
 
 async function loadLatestPredictionModel(db) {
   return db.collection("prediction_models").findOne({ _id: PREDICTION_MODEL_ID })
+}
+
+function modelValidationState(model = null) {
+  if (model?.status !== "trained") {
+    return { status: model?.status || "missing", allow_live_classifier: false, edge: null, reason: "model_not_trained" }
+  }
+  if (!model.metrics) {
+    return { status: "training_evaluation", allow_live_classifier: true, edge: null, reason: "temporary_model_without_persisted_metrics" }
+  }
+  const metrics = model?.metrics || {}
+  const actionable = Number(metrics.actionable_samples || 0)
+  const accuracy = Number(metrics.directional_accuracy_5m)
+  const baselineAccuracy = Number(metrics.baseline_directional_accuracy_5m)
+  const minSamples = Number(process.env.MIN_LIVE_MODEL_VALIDATION_SAMPLES || 50)
+  const minEdge = Number(process.env.MIN_LIVE_MODEL_EDGE || 0)
+  const minAccuracy = Number(process.env.MIN_LIVE_MODEL_ACCURACY || 0.60)
+  const edge = Number.isFinite(accuracy) && Number.isFinite(baselineAccuracy) ? Number((accuracy - baselineAccuracy).toFixed(3)) : null
+  if (model?.direction_classifier?.type === "knn_centroid_direction_v1" && process.env.ALLOW_KNN_LIVE_MODEL !== "1") {
+    return { status: "shadow_knn_disabled", allow_live_classifier: false, edge, reason: "knn_live_use_disabled" }
+  }
+  if (actionable < minSamples) {
+    return { status: "shadow_insufficient_validation", allow_live_classifier: false, edge, reason: `needs_at_least_${minSamples}_actionable_holdout_samples` }
+  }
+  if (!Number.isFinite(accuracy)) {
+    return { status: "shadow_no_validation_accuracy", allow_live_classifier: false, edge, reason: "missing_validation_accuracy" }
+  }
+  if (accuracy < minAccuracy) {
+    return { status: "shadow_below_required_accuracy", allow_live_classifier: false, edge, reason: `model_accuracy_${accuracy.toFixed(3)}_below_required_${minAccuracy.toFixed(3)}` }
+  }
+  if (Number.isFinite(baselineAccuracy) && accuracy < baselineAccuracy + minEdge) {
+    return { status: "shadow_under_baseline", allow_live_classifier: false, edge, reason: `model_accuracy_${accuracy.toFixed(3)}_below_required_baseline_${(baselineAccuracy + minEdge).toFixed(3)}` }
+  }
+  return { status: "live_validated_edge", allow_live_classifier: true, edge, reason: "model_beats_recent_baseline" }
+}
+
+function isLiveModelSignalEligible(signal = null, model = null) {
+  if (!signal || model?.status !== "trained") return false
+  if (Number(signal.confidence || 0) < MIN_LIVE_MODEL_CONFIDENCE) return false
+  return modelValidationState(model).allow_live_classifier
 }
 
 async function loadEnrichedTradeWatchRows(db, { limit = 10, days = 2, socialWindow = 60 } = {}) {
@@ -4585,9 +4887,10 @@ app.get("/api/ticker/:ticker/enrich", async (req, res) => {
   }
 })
 
-app.use('/api/social',      socialRouter)
-app.use('/api/correlation', correlationRouter)
-app.use('/api/settings',    settingsRouter)
+app.use('/api/social',       socialRouter)
+app.use('/api/correlation',  correlationRouter)
+app.use('/api/settings',     settingsRouter)
+app.use('/api/decision-map', decisionMapRouter)
 
 // ── Health check ──────────────────────────────────────────
 app.get('/api/health', async (req, res) => {
