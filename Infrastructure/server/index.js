@@ -1050,6 +1050,12 @@ function recentArticleMatch(days = 0) {
   return articleWindowMatch(cutoffMs)
 }
 
+function approvedNewsSourceMongoFilter(field = 'source') {
+  const blocked = process.env.BLOCKED_SOURCES ? process.env.BLOCKED_SOURCES.split(',').map(s => s.trim()).filter(Boolean) : []
+  if (!blocked.length) return {}
+  return { [field]: { $nin: blocked } }
+}
+
 function articleMatchStage(match) {
   return Object.keys(match).length ? [{ $match: match }] : []
 }
@@ -6543,7 +6549,7 @@ app.get('/api/ticker/:ticker/keystats', async (req, res) => {
   }
 
   // 2. Live Yahoo Finance fetch when MongoDB is missing the key fields
-  const needsLive = !stats || (stats.high_52w == null && stats.beta == null)
+  const needsLive = !stats || stats.beta == null || stats.analyst == null || stats.target_price == null || stats.float_short == null || stats.earnings_date == null
   if (needsLive) {
     try {
       const url = `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${ticker}?modules=summaryDetail,defaultKeyStatistics,financialData,calendarEvents`
@@ -6706,7 +6712,7 @@ app.get('/api/reddit/posts/:ticker', async (req, res) => {
       if (ppResp.ok) {
         const ppData = await ppResp.json()
         const posts = (ppData.data || [])
-          .filter(d => d && d.id && isRelevant(d.title, d.selftext))
+          .filter(d => d && d.id)
           .slice(0, limit)
           .map(d => ({
             id: d.id, title: d.title, subreddit: d.subreddit, author: d.author,

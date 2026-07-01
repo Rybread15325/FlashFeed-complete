@@ -14,15 +14,16 @@ const LAST_FETCH_KEY = 'flashfeed:lastFetchAt'
 
 const NAV = [
   { href: '/overview', label: 'Overview' },
-  { href: '/ai', label: 'AI' },
-  { href: '/news', label: 'News' },
-  { href: '/screener', label: 'Screener' },
-  { href: '/social', label: 'Social' },
-  { href: '/charts', label: 'Charts' },
-  { href: '/charts-grid', label: 'Charts Grid' },
-  { href: '/momentum', label: 'Momentum' },
-  { href: '/correlation', label: 'Correlation' },
+  { href: '/momentum', label: 'Top Movers' },
   { href: '/decision-map', label: 'Decision Map' },
+  { href: '/predictions', label: 'Predicted Up Tomorrow' },
+  { href: '/ai', label: 'High Conviction' },
+  { href: '/news', label: 'News/Catalysts' },
+  { href: '/charts', label: 'Performance' },
+  { href: '/charts-grid', label: 'Technical' },
+  { href: '/social', label: 'Sentiment' },
+  { href: '/screener', label: 'Screener' },
+  { href: '/correlation', label: 'Correlation' },
   { href: '/settings', label: 'Settings' },
 ]
 
@@ -204,7 +205,7 @@ export function TopBar() {
             <div className="text-neutral text-[10px] mt-1 uppercase tracking-wide">Financial Intelligence</div>
           </NavLink>
 
-          <nav className="hidden xl:flex items-center gap-1 ml-2">
+          <nav className="hidden xl:flex items-center gap-0 ml-2 self-stretch">
             {NAV.map(({ href, label }) => {
               const active = pathname === href || pathname.startsWith(`${href}/`)
               return (
@@ -212,10 +213,10 @@ export function TopBar() {
                   key={href}
                   to={href}
                   className={clsx(
-                    'px-3 py-2 text-xs rounded-md border transition-colors',
+                    'px-3 py-2 text-xs font-medium transition-colors border-b-2 whitespace-nowrap self-stretch flex items-center',
                     active
-                      ? 'bg-accent/15 border-accent/50 text-white'
-                      : 'border-transparent text-neutral hover:text-white hover:bg-bg/60'
+                      ? 'text-white border-sky-400'
+                      : 'text-slate-400 border-transparent hover:text-white hover:border-slate-600'
                   )}
                 >
                   {label}
@@ -341,7 +342,7 @@ export function TopBar() {
           </div>
         </div>
 
-        <nav className="xl:hidden flex items-center gap-1 overflow-x-auto px-4 pb-2">
+        <nav className="xl:hidden flex items-center gap-0 overflow-x-auto px-4 border-t border-border">
           {NAV.map(({ href, label }) => {
             const active = pathname === href || pathname.startsWith(`${href}/`)
             return (
@@ -349,10 +350,10 @@ export function TopBar() {
                 key={href}
                 to={href}
                 className={clsx(
-                  'flex-shrink-0 px-3 py-1.5 text-xs rounded-md border transition-colors',
+                  'flex-shrink-0 px-3 py-2 text-xs font-medium border-b-2 transition-colors whitespace-nowrap',
                   active
-                    ? 'bg-accent/15 border-accent/50 text-white'
-                    : 'border-border text-neutral hover:text-white'
+                    ? 'text-white border-sky-400'
+                    : 'text-slate-400 border-transparent hover:text-white'
                 )}
               >
                 {label}

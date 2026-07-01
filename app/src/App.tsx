@@ -13,6 +13,7 @@ import { MomentumPage }    from './pages/MomentumPage'
 import { CorrelationPage } from './pages/CorrelationPage'
 import { SettingsPage }    from './pages/SettingsPage'
 import { DecisionMapPanel } from './pages/DecisionMapPanel'
+import { PredictionsPage } from './pages/PredictionsPage'
 import { LanguageContext, getStoredLanguage, storeLanguage } from './lib/language'
 
 export default function App() {
@@ -45,6 +46,7 @@ export default function App() {
             <Route path="/momentum"    element={<MomentumPage />} />
             <Route path="/correlation"   element={<CorrelationPage />} />
             <Route path="/decision-map" element={<DecisionMapPanel />} />
+            <Route path="/predictions"  element={<PredictionsPage />} />
             <Route path="/settings"     element={<SettingsPage />} />
           </Routes>
         </AppShell>
