@@ -14,6 +14,7 @@ import { CorrelationPage } from './pages/CorrelationPage'
 import { SettingsPage }    from './pages/SettingsPage'
 import { DecisionMapPanel } from './pages/DecisionMapPanel'
 import { PredictionsPage } from './pages/PredictionsPage'
+import { Graph3DPage }     from './pages/Graph3DPage'
 import { LanguageContext, getStoredLanguage, storeLanguage } from './lib/language'
 
 export default function App() {
@@ -44,6 +45,7 @@ export default function App() {
             <Route path="/charts"      element={<ChartsPage />} />
             <Route path="/charts-grid" element={<ChartsGridPage />} />
             <Route path="/momentum"    element={<MomentumPage />} />
+            <Route path="/3d"          element={<Graph3DPage />} />
             <Route path="/correlation"   element={<CorrelationPage />} />
             <Route path="/decision-map" element={<DecisionMapPanel />} />
             <Route path="/predictions"  element={<PredictionsPage />} />

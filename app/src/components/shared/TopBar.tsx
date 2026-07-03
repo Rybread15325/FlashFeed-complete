@@ -20,6 +20,7 @@ const NAV = [
   { href: '/social', label: 'Social' },
   { href: '/charts', label: 'Charts' },
   { href: '/momentum', label: 'Momentum' },
+  { href: '/3d', label: '3D' },
   { href: '/settings', label: 'Settings' },
 ]
 
