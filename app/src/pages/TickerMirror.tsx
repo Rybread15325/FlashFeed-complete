@@ -617,8 +617,38 @@ function TickerMirrorContent({ ticker, row, onClose }: { ticker: string; row: SR
                 ? <div className="text-xs text-neutral animate-pulse">Loading Reddit posts…</div>
                 : (redditData.posts ?? []).length === 0
                   ? (
-                    <div className="flex flex-col gap-2 items-start">
-                      <span className="text-xs text-neutral">No relevant Reddit posts found for ${ticker}.</span>
+                    <div className="flex flex-col gap-3 items-start">
+                      {redditData.buzz ? (
+                        <div className="w-full">
+                          <div className="text-[10px] text-slate-500 uppercase tracking-wide mb-2">
+                            Reddit Buzz — {ticker} · last 24h <span className="normal-case">(via ApeWisdom)</span>
+                          </div>
+                          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                            {([
+                              ['Mention Rank', `#${redditData.buzz.rank}`, redditData.buzz.rank_24h_ago != null ? `was #${redditData.buzz.rank_24h_ago}` : null,
+                                redditData.buzz.rank_24h_ago != null && redditData.buzz.rank < redditData.buzz.rank_24h_ago ? 'text-emerald-400' : 'text-white'],
+                              ['Mentions', String(redditData.buzz.mentions ?? 0), redditData.buzz.mentions_24h_ago != null ? `prev ${redditData.buzz.mentions_24h_ago}` : null,
+                                redditData.buzz.mentions_24h_ago != null && redditData.buzz.mentions > redditData.buzz.mentions_24h_ago ? 'text-emerald-400' : 'text-white'],
+                              ['Upvotes', String(redditData.buzz.upvotes ?? 0), null, 'text-white'],
+                              ['Trend', redditData.buzz.rank_24h_ago == null ? '—'
+                                : redditData.buzz.rank < redditData.buzz.rank_24h_ago ? '▲ Rising'
+                                : redditData.buzz.rank > redditData.buzz.rank_24h_ago ? '▼ Falling' : '— Flat',
+                                null,
+                                redditData.buzz.rank_24h_ago == null ? 'text-neutral'
+                                : redditData.buzz.rank < redditData.buzz.rank_24h_ago ? 'text-emerald-400'
+                                : redditData.buzz.rank > redditData.buzz.rank_24h_ago ? 'text-red-400' : 'text-neutral'],
+                            ] as [string, string, string | null, string][]).map(([label, value, sub, color]) => (
+                              <div key={label} className="bg-surface border border-border rounded px-2.5 py-2">
+                                <div className={`font-mono text-sm font-bold ${color}`}>{value}</div>
+                                <div className="text-[9px] uppercase text-neutral mt-0.5">{label}{sub ? <span className="normal-case text-slate-600"> · {sub}</span> : null}</div>
+                              </div>
+                            ))}
+                          </div>
+                          <div className="text-[10px] text-slate-500 mt-2">Live post feed unavailable from the server — aggregate mention data shown instead.</div>
+                        </div>
+                      ) : (
+                        <span className="text-xs text-neutral">No relevant Reddit posts found for ${ticker}.</span>
+                      )}
                       <a
                         href={`https://www.reddit.com/search/?q=%24${ticker}&sort=new&t=week`}
                         target="_blank" rel="noreferrer"

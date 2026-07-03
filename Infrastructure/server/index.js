@@ -6964,7 +6964,38 @@ app.get('/api/reddit/posts/:ticker', async (req, res) => {
         score: null, num_comments: null, url: e.link, preview: null, created_utc: e.created_utc,
       }))
     trace.push(`rss: ${entries.length} entries, ${posts.length} relevant`)
-    return res.json({ ok: true, ticker, posts, source: posts.length > 0 ? 'rss' : 'none', ...(posts.length === 0 || req.query.debug === '1' ? { trace } : {}) })
+
+    // 6. ApeWisdom aggregate buzz — Reddit mention stats survive IP blocks
+    //    because ApeWisdom runs its own scrapers
+    let buzz = null
+    if (posts.length === 0) {
+      try {
+        for (let page = 1; page <= 3 && !buzz; page++) {
+          const awResp = await fetch(`https://apewisdom.io/api/v1.0/filter/all-stocks/page/${page}`, {
+            headers: { 'User-Agent': 'FlashFeed/1.0 financial-dashboard' },
+            signal: AbortSignal.timeout(8000),
+          })
+          if (!awResp.ok) { trace.push(`apewisdom p${page}: HTTP ${awResp.status}`); break }
+          const awData = await awResp.json()
+          const results = awData.results || []
+          const hit = results.find(r => String(r.ticker).toUpperCase() === ticker)
+          if (hit) {
+            buzz = {
+              rank: hit.rank, mentions: hit.mentions, upvotes: hit.upvotes,
+              rank_24h_ago: hit.rank_24h_ago, mentions_24h_ago: hit.mentions_24h_ago,
+            }
+          }
+          if (results.length === 0) break
+        }
+        if (!buzz) trace.push('apewisdom: ticker not in top 300 mentioned')
+      } catch (e) { trace.push(`apewisdom: ${e.message}`) }
+    }
+
+    return res.json({
+      ok: true, ticker, posts, buzz,
+      source: posts.length > 0 ? 'rss' : buzz ? 'apewisdom' : 'none',
+      ...(posts.length === 0 || req.query.debug === '1' ? { trace } : {}),
+    })
   } catch (e) {
     return res.json({ ok: false, posts: [], error: String(e.message || e), trace })
   }
