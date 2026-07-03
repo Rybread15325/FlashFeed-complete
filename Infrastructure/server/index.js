@@ -6843,6 +6843,7 @@ app.get('/api/reddit/posts/:ticker', async (req, res) => {
   if (!ticker) return res.status(400).json({ ok: false, posts: [], error: 'ticker required' })
 
   const limit = Math.min(Number(req.query.limit) || 10, 25)
+  const trace = []
   const SUBS  = 'wallstreetbets+investing+stocks+StockMarket+options+SecurityAnalysis+ValueInvesting'
   const BROWS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
@@ -6887,13 +6888,14 @@ app.get('/api/reddit/posts/:ticker', async (req, res) => {
           const q = encodeURIComponent(rawQ)
           const url = `https://${domain}/r/${SUBS}/search.json?q=${q}&restrict_sr=on&sort=new&t=month&limit=${limit * 2}`
           const resp = await fetch(url, { headers: BROWS, signal: AbortSignal.timeout(8000) })
-          if (!resp.ok) continue
+          if (!resp.ok) { trace.push(`json ${domain} "${rawQ}": HTTP ${resp.status}`); continue }
           const text = await resp.text()
-          if (text.trimStart().startsWith('<')) continue // HTML = IP blocked
+          if (text.trimStart().startsWith('<')) { trace.push(`json ${domain} "${rawQ}": HTML (IP blocked)`); continue }
           const data = JSON.parse(text)
           const posts = mapJson(data?.data?.children ?? []).slice(0, limit)
           if (posts.length > 0) return res.json({ ok: true, ticker, posts, source: 'reddit-json' })
-        } catch (_) {}
+          trace.push(`json ${domain} "${rawQ}": 0 relevant of ${data?.data?.children?.length ?? 0}`)
+        } catch (e) { trace.push(`json ${domain} "${rawQ}": ${e.message}`) }
       }
     }
 
@@ -6904,7 +6906,12 @@ app.get('/api/reddit/posts/:ticker', async (req, res) => {
         fetch(`https://arctic-shift.photon-reddit.com/api/posts/search?query=${encodeURIComponent(ticker)}&subreddit=${sub}&limit=${limit}&sort=desc`, {
           headers: { 'User-Agent': 'FlashFeed/1.0 financial-dashboard' },
           signal: AbortSignal.timeout(8000),
-        }).then(r => (r.ok ? r.json() : null))
+        }).then(async r => {
+          if (!r.ok) { trace.push(`arctic ${sub}: HTTP ${r.status}`); return null }
+          const j = await r.json()
+          if (j?.error) { trace.push(`arctic ${sub}: ${j.error}`); return null }
+          return j
+        }).catch(e => { trace.push(`arctic ${sub}: ${e.message}`); return null })
       ))
       const asPosts = asResults
         .flatMap(r => (r.status === 'fulfilled' && Array.isArray(r.value?.data) ? r.value.data : []))
@@ -6930,8 +6937,9 @@ app.get('/api/reddit/posts/:ticker', async (req, res) => {
           headers: { 'User-Agent': 'FlashFeed/1.0 financial-dashboard' },
           signal: AbortSignal.timeout(10000),
         })
-        if (!ppResp.ok) continue
+        if (!ppResp.ok) { trace.push(`pullpush "${rawQ}": HTTP ${ppResp.status}`); continue }
         const ppData = await ppResp.json()
+        trace.push(`pullpush "${rawQ}": ${(ppData.data || []).length} raw`)
         const posts = (ppData.data || [])
           .filter(d => d && d.id && isRelevant(d.title, d.selftext))
           .slice(0, limit)
@@ -6943,7 +6951,7 @@ app.get('/api/reddit/posts/:ticker', async (req, res) => {
             created_utc: d.created_utc,
           }))
         if (posts.length > 0) return res.json({ ok: true, ticker, posts, source: 'pullpush' })
-      } catch (_) {}
+      } catch (e) { trace.push(`pullpush "${rawQ}": ${e.message}`) }
     }
 
     // 5. Reddit RSS — filter strictly for relevance (blocked IPs return generic posts)
@@ -6955,9 +6963,10 @@ app.get('/api/reddit/posts/:ticker', async (req, res) => {
         id: e.id, title: e.title, subreddit: e.subreddit, author: e.author,
         score: null, num_comments: null, url: e.link, preview: null, created_utc: e.created_utc,
       }))
-    return res.json({ ok: true, ticker, posts, source: posts.length > 0 ? 'rss' : 'none' })
+    trace.push(`rss: ${entries.length} entries, ${posts.length} relevant`)
+    return res.json({ ok: true, ticker, posts, source: posts.length > 0 ? 'rss' : 'none', ...(posts.length === 0 || req.query.debug === '1' ? { trace } : {}) })
   } catch (e) {
-    return res.json({ ok: false, posts: [], error: String(e.message || e) })
+    return res.json({ ok: false, posts: [], error: String(e.message || e), trace })
   }
 })
 
