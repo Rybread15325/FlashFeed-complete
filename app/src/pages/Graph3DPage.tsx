@@ -4,6 +4,7 @@
 // scroll to zoom, hover a bar for details.
 import { useEffect, useRef, useState } from 'react'
 import useSWR from 'swr'
+import { DecisionMapPanel } from './DecisionMapPanel'
 import type { ScreenerRow } from '@/lib/types'
 
 const fetcher = (url: string) => fetch(url).then(r => r.json())
@@ -44,6 +45,31 @@ function fmtVal(v: number, m: Metric, change: number): string {
 }
 
 export function Graph3DPage() {
+  const [view, setView] = useState<'graph' | 'map'>('graph')
+
+  return (
+    <div>
+      <div className="flex items-center gap-1 mb-4 border-b border-border [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
+        {([['graph', '3D Market Graph'], ['map', 'Decision Map']] as const).map(([id, label]) => (
+          <button
+            key={id}
+            onClick={() => setView(id)}
+            className={`flex-shrink-0 px-3 py-2 text-xs font-medium border-b-2 -mb-px transition-colors whitespace-nowrap ${
+              view === id
+                ? 'text-white border-sky-400'
+                : 'text-neutral border-transparent hover:text-white hover:border-slate-600'
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      {view === 'graph' ? <MarketBars3D /> : <DecisionMapPanel />}
+    </div>
+  )
+}
+
+function MarketBars3D() {
   const { data } = useSWR('/api/screener?limit=200', fetcher, { refreshInterval: 60_000 })
   const [metric, setMetric] = useState<Metric>('change')
   const canvasRef = useRef<HTMLCanvasElement>(null)

@@ -285,8 +285,21 @@ export default function SocialPage() {
       ) : posts.length === 0 ? (
         <div className="text-neutral text-center py-20">
           <div className="text-5xl mb-4">💬</div>
-          <div>No posts found for current filters</div>
-          <div className="text-sm mt-2">Try 24h, or run the social collector to populate the live 5m window.</div>
+          {active === 'twitter' ? (
+            <>
+              <div>No X posts yet</div>
+              <div className="text-sm mt-2 max-w-md mx-auto">
+                The X API account has no paid credits, so X blocks tweet searches (free tier doesn't include them).
+                Posts appear here automatically once credits are added at developer.x.com — meanwhile the
+                StockTwits tab has live trader chatter.
+              </div>
+            </>
+          ) : (
+            <>
+              <div>No posts found for current filters</div>
+              <div className="text-sm mt-2">Try the 24h window — the collector refreshes every 10 minutes.</div>
+            </>
+          )}
         </div>
       ) : (
         <div className="space-y-3">

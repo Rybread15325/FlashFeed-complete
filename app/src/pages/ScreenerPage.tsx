@@ -7,7 +7,6 @@ import { IntradayChart } from './IntradayChart'
 import { TickerMirror } from './TickerMirror'
 import { OverviewPage } from './OverviewPage'
 import { MomentumPage } from './MomentumPage'
-import { DecisionMapPanel } from './DecisionMapPanel'
 import { PredictionsPage } from './PredictionsPage'
 import { AIPage } from './AIPage'
 import { NewsPage } from './NewsPage'
@@ -16,13 +15,12 @@ import { ChartsGridPage } from './ChartsGridPage'
 import SocialPage from './SocialPage'
 import type { Article, ScreenerRow } from '@/lib/types'
 
-type SubTab = 'screener' | 'overview' | 'movers' | 'decisionmap' | 'predicted' | 'conviction' | 'news' | 'performance' | 'technical' | 'sentiment'
+type SubTab = 'screener' | 'overview' | 'movers' | 'predicted' | 'conviction' | 'news' | 'performance' | 'technical' | 'sentiment'
 
 const SUB_TABS: { id: SubTab; label: string }[] = [
   { id: 'screener',    label: 'Screener' },
   { id: 'overview',   label: 'Overview' },
   { id: 'movers',     label: 'Top Movers' },
-  { id: 'decisionmap',label: 'Decision Map' },
   { id: 'predicted',  label: 'Predicted Up Tomorrow' },
   { id: 'conviction', label: 'High Conviction' },
   { id: 'news',       label: 'News/Catalysts' },
@@ -391,7 +389,6 @@ export function ScreenerPage() {
   const subContent: Record<Exclude<SubTab, 'screener'>, JSX.Element> = {
     overview:    <OverviewPage />,
     movers:      <MomentumPage />,
-    decisionmap: <DecisionMapPanel />,
     predicted:   <PredictionsPage />,
     conviction:  <AIPage />,
     news:        <NewsPage />,

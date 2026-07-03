@@ -3263,6 +3263,7 @@ async function fetchStockTwitsForTicker(db, ticker) {
         author: msg.user?.username || '',
         sentiment: sentimentRaw || 'Neutral',
         sentiment_score: sentimentScore,
+        finance_keywords: socialKeywordsFor(msg.body),
         url: `https://stocktwits.com/symbol/${ticker}`,
         fetched_at: Math.floor(Date.now() / 1000),
         detected_at: createdSec,
@@ -3353,6 +3354,7 @@ async function fetchRedditForTicker(db, ticker) {
       const redditId = String(e.id || '')
       if (!redditId) continue
 
+      const naive = naiveSocialSentiment(e.title)
       const doc = {
         platform: 'reddit',
         collector: 'node_reddit_rss',
@@ -3360,8 +3362,9 @@ async function fetchRedditForTicker(db, ticker) {
         symbol: ticker,
         text: e.title,
         author: e.author || '',
-        sentiment: 'Neutral',
-        sentiment_score: 0,
+        sentiment: naive.sentiment,
+        sentiment_score: naive.score,
+        finance_keywords: socialKeywordsFor(e.title),
         url: e.link,
         subreddit: e.subreddit || '',
         fetched_at: Math.floor(Date.now() / 1000),
@@ -3382,6 +3385,239 @@ async function fetchRedditForTicker(db, ticker) {
   } catch (err) {
     console.warn('[reddit] fetch failed for', ticker, err.message)
     return 0
+  }
+}
+
+// ── Node-native social collectors (run fine from Railway; no Python needed) ──
+const SOCIAL_BULL_WORDS = ['bull', 'bullish', 'calls', 'moon', 'rocket', 'buy the dip', 'long', 'breakout', 'squeeze', 'rally', 'rip', 'pump', 'gains', 'undervalued', 'ath', 'beat', 'upgrade', 'to the moon']
+const SOCIAL_BEAR_WORDS = ['bear', 'bearish', 'puts', 'short', 'sell', 'dump', 'crash', 'drill', 'tank', 'overvalued', 'bagholder', 'miss', 'downgrade', 'bankrupt', 'fraud', 'rug']
+
+function naiveSocialSentiment(text) {
+  const lower = String(text || '').toLowerCase()
+  let bull = 0
+  let bear = 0
+  for (const w of SOCIAL_BULL_WORDS) if (lower.includes(w)) bull++
+  for (const w of SOCIAL_BEAR_WORDS) if (lower.includes(w)) bear++
+  if (!bull && !bear) return { sentiment: 'Neutral', score: 0 }
+  const score = Number(((bull - bear) / (bull + bear)).toFixed(2))
+  return { sentiment: score > 0 ? 'Bullish' : score < 0 ? 'Bearish' : 'Neutral', score }
+}
+
+function socialKeywordsFor(text) {
+  const kws = new Set(detectCatalysts(text))
+  const tags = String(text || '').match(/[#$][A-Za-z][A-Za-z0-9._-]{1,14}/g) || []
+  for (const tag of tags.slice(0, 6)) kws.add(tag.slice(1).toUpperCase())
+  return Array.from(kws).slice(0, 8)
+}
+
+// Bluesky AppView search — unauthenticated. Note: api.bsky.app, not
+// public.api.bsky.app (the public host 403s searchPosts).
+async function fetchBlueskyForTicker(db, ticker) {
+  try {
+    const url = `https://api.bsky.app/xrpc/app.bsky.feed.searchPosts?q=${encodeURIComponent('$' + ticker)}&limit=25&sort=latest`
+    const resp = await fetch(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0 FlashFeed/1.0' },
+      signal: AbortSignal.timeout(12000),
+    })
+    if (!resp.ok) return 0
+    const json = await resp.json()
+    const posts = Array.isArray(json.posts) ? json.posts : []
+    const nowSec = Math.floor(Date.now() / 1000)
+    let inserted = 0
+    for (const post of posts) {
+      const uri = String(post.uri || '')
+      const text = String(post.record?.text || '')
+      if (!uri || !text) continue
+      const createdSec = post.record?.createdAt
+        ? Math.floor(new Date(post.record.createdAt).getTime() / 1000)
+        : nowSec
+      if (createdSec < nowSec - 7 * 86400) continue
+      const { sentiment, score } = naiveSocialSentiment(text)
+      const handle = post.author?.handle || ''
+      const postId = uri.split('/').pop()
+      const doc = {
+        platform: 'bluesky',
+        collector: 'node_bluesky',
+        ticker,
+        symbol: ticker,
+        text,
+        author: handle,
+        sentiment,
+        sentiment_score: score,
+        finance_keywords: socialKeywordsFor(text),
+        url: handle && postId ? `https://bsky.app/profile/${handle}/post/${postId}` : 'https://bsky.app',
+        fetched_at: nowSec,
+        detected_at: createdSec,
+        timestamp: createdSec,
+        created_at: new Date(createdSec * 1000),
+        source: 'bluesky',
+        _bsky_uri: uri,
+      }
+      const result = await db.collection('socials').updateOne(
+        { _bsky_uri: uri },
+        { $setOnInsert: doc },
+        { upsert: true }
+      )
+      if (result.upsertedCount) inserted++
+    }
+    return inserted
+  } catch (err) {
+    console.warn('[bluesky] fetch failed for', ticker, err.message)
+    return 0
+  }
+}
+
+// X API v2 recent search — needs TWITTER_BEARER_TOKEN + paid credits on the X
+// account. Backs off for an hour on 402 (no credits) / 429 so it activates
+// automatically the moment credits exist without hammering the API meanwhile.
+let _twitterCooldownUntil = 0
+async function fetchTwitterForTicker(db, ticker) {
+  const token = process.env.TWITTER_BEARER_TOKEN || process.env.X_BEARER_TOKEN || ''
+  if (!token || Date.now() < _twitterCooldownUntil) return 0
+  try {
+    const query = encodeURIComponent(`$${ticker} -is:retweet lang:en`)
+    const url = `https://api.x.com/2/tweets/search/recent?query=${query}&max_results=25&tweet.fields=created_at&expansions=author_id&user.fields=username`
+    const resp = await fetch(url, {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(12000),
+    })
+    if ([402, 403, 429].includes(resp.status)) {
+      _twitterCooldownUntil = Date.now() + 60 * 60 * 1000
+      console.warn(`[x] search returned ${resp.status} — backing off 1h (no credits or rate limited)`)
+      return 0
+    }
+    if (!resp.ok) return 0
+    const json = await resp.json()
+    const tweets = Array.isArray(json.data) ? json.data : []
+    const users = new Map((json.includes?.users || []).map(u => [u.id, u.username]))
+    const nowSec = Math.floor(Date.now() / 1000)
+    let inserted = 0
+    for (const tw of tweets) {
+      const id = String(tw.id || '')
+      const text = String(tw.text || '')
+      if (!id || !text) continue
+      const createdSec = tw.created_at ? Math.floor(new Date(tw.created_at).getTime() / 1000) : nowSec
+      const { sentiment, score } = naiveSocialSentiment(text)
+      const username = users.get(tw.author_id) || ''
+      const doc = {
+        platform: 'twitter',
+        collector: 'node_x_api',
+        ticker,
+        symbol: ticker,
+        text,
+        author: username,
+        sentiment,
+        sentiment_score: score,
+        finance_keywords: socialKeywordsFor(text),
+        url: username ? `https://x.com/${username}/status/${id}` : `https://x.com/i/status/${id}`,
+        fetched_at: nowSec,
+        detected_at: createdSec,
+        timestamp: createdSec,
+        created_at: new Date(createdSec * 1000),
+        source: 'twitter',
+        _x_id: id,
+      }
+      const result = await db.collection('socials').updateOne(
+        { _x_id: id },
+        { $setOnInsert: doc },
+        { upsert: true }
+      )
+      if (result.upsertedCount) inserted++
+    }
+    return inserted
+  } catch (err) {
+    console.warn('[x] fetch failed for', ticker, err.message)
+    return 0
+  }
+}
+
+// ApeWisdom Reddit mention aggregates → one "trending" card per ticker per day.
+// Keeps the Reddit tab alive even though Railway's IP is blocked from Reddit
+// itself. Refreshed each cycle so the numbers stay current.
+let _apeTrendsLastRun = 0
+async function fetchApeWisdomTrendsToSocials(db) {
+  if (Date.now() - _apeTrendsLastRun < 30 * 60 * 1000) return 0
+  _apeTrendsLastRun = Date.now()
+  try {
+    const resp = await fetch('https://apewisdom.io/api/v1.0/filter/all-stocks/page/1', {
+      headers: { 'User-Agent': 'Mozilla/5.0 FlashFeed/1.0' },
+      signal: AbortSignal.timeout(15000),
+    })
+    if (!resp.ok) return 0
+    const json = await resp.json()
+    const results = Array.isArray(json.results) ? json.results : []
+    const day = new Date().toISOString().slice(0, 10)
+    const nowSec = Math.floor(Date.now() / 1000)
+    let upserted = 0
+    for (const row of results.slice(0, 40)) {
+      const ticker = String(row.ticker || '').toUpperCase()
+      if (!ticker || NON_STOCK_TICKERS.has(ticker)) continue
+      const mentions = Number(row.mentions || 0)
+      const prev = Number(row.mentions_24h_ago || 0)
+      const deltaPct = prev > 0 ? Math.round(((mentions - prev) / prev) * 100) : null
+      const trendWord = deltaPct === null ? '' : ` (${deltaPct >= 0 ? '+' : ''}${deltaPct}% vs yesterday)`
+      const text = `$${ticker} is #${row.rank} on Reddit by mentions — ${mentions} mentions in the last 24h${trendWord}, ${Number(row.upvotes || 0).toLocaleString()} upvotes.`
+      const apeId = `${ticker}:${day}`
+      const result = await db.collection('socials').updateOne(
+        { _ape_id: apeId },
+        {
+          $set: { text, fetched_at: nowSec, timestamp: nowSec, detected_at: nowSec },
+          $setOnInsert: {
+            platform: 'reddit',
+            collector: 'node_apewisdom_trends',
+            ticker,
+            symbol: ticker,
+            author: 'ApeWisdom · r/all',
+            sentiment: deltaPct !== null && deltaPct >= 25 ? 'Bullish' : 'Neutral',
+            sentiment_score: deltaPct !== null && deltaPct >= 25 ? 0.5 : 0,
+            finance_keywords: ['trending', 'reddit mentions'],
+            url: `https://www.reddit.com/search/?q=%24${ticker}`,
+            created_at: new Date(nowSec * 1000),
+            source: 'reddit',
+            _ape_id: apeId,
+          },
+        },
+        { upsert: true }
+      )
+      if (result.upsertedCount) upserted++
+    }
+    return upserted
+  } catch (err) {
+    console.warn('[apewisdom-trends] fetch failed:', err.message)
+    return 0
+  }
+}
+
+// Collector cycle: top momentum tickers + heavily-traded defaults, all sources.
+// StockTwits allows ~200 unauthenticated req/hr per IP, so a 10-minute cadence
+// with ≤14 tickers stays well inside the limit.
+const SOCIAL_COLLECTOR_DEFAULT_TICKERS = ['AAPL', 'TSLA', 'NVDA', 'AMD', 'MSFT', 'META', 'AMZN', 'GOOGL', 'PLTR', 'SPY', 'COIN', 'HOOD']
+let _socialCollectorRunning = false
+async function runNodeSocialCollector() {
+  if (_socialCollectorRunning) return
+  _socialCollectorRunning = true
+  try {
+    const db = mongoose.connection.db
+    if (!db) return
+    let tickers = []
+    try { tickers = await loadTopMomentumTickerSymbols(db, 8) } catch { /* screener may be empty */ }
+    tickers = Array.from(new Set([...tickers, ...SOCIAL_COLLECTOR_DEFAULT_TICKERS])).slice(0, 14)
+    let st = 0, rd = 0, bs = 0, tw = 0
+    for (const ticker of tickers) {
+      const [a, b, c, d] = await Promise.all([
+        fetchStockTwitsForTicker(db, ticker),
+        fetchRedditForTicker(db, ticker),
+        fetchBlueskyForTicker(db, ticker),
+        fetchTwitterForTicker(db, ticker),
+      ])
+      st += a; rd += b; bs += c; tw += d
+    }
+    const ape = await fetchApeWisdomTrendsToSocials(db)
+    console.log(`[social-collector] +${st} stocktwits, +${rd} reddit, +${bs} bluesky, +${tw} x, +${ape} reddit-trends (${tickers.length} tickers)`)
+  } catch (err) {
+    console.error('[social-collector] cycle failed:', err.message)
+  } finally {
+    _socialCollectorRunning = false
   }
 }
 
@@ -7175,6 +7411,12 @@ app.listen(PORT, () => {
     }
   })
   console.log('  Cron    →  auto-fetch every 20 min')
+
+  // Node social collector: fills the socials collection from sources reachable
+  // on Railway (StockTwits, Bluesky, ApeWisdom; Reddit RSS + X when available).
+  cron.schedule('*/10 * * * *', runNodeSocialCollector)
+  setTimeout(() => { runNodeSocialCollector() }, 15000)
+  console.log('  Cron    →  social collector every 10 min')
 
   // Auto-save snapshot when the server process exits
   const shutdown = async (signal) => {
