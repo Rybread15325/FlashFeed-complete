@@ -62,6 +62,65 @@ function getChartParams(marketCap: number | null | undefined) {
   return { range: '1d', interval: '5m', capLabel: 'Micro' }
 }
 
+const SECTOR_COLORS = ['#38bdf8', '#a78bfa', '#fbbf24', '#34d399', '#f472b6', '#64748b']
+
+interface PieSlice { label: string; value: number; color: string }
+
+function MiniPie({ title, slices, centerLabel }: { title: string; slices: PieSlice[]; centerLabel?: string }) {
+  const total = slices.reduce((s, x) => s + x.value, 0)
+  const r = 44, cx = 50, cy = 50
+
+  const paths: React.ReactNode[] = []
+  if (total > 0) {
+    const visible = slices.filter(s => s.value > 0)
+    if (visible.length === 1) {
+      paths.push(<circle key={visible[0].label} cx={cx} cy={cy} r={r} fill={visible[0].color} />)
+    } else {
+      let angle = -Math.PI / 2
+      for (const s of visible) {
+        const sweep = (s.value / total) * Math.PI * 2
+        const a1 = angle + sweep
+        const x0 = cx + r * Math.cos(angle), y0 = cy + r * Math.sin(angle)
+        const x1 = cx + r * Math.cos(a1),    y1 = cy + r * Math.sin(a1)
+        paths.push(
+          <path
+            key={s.label}
+            d={`M ${cx} ${cy} L ${x0} ${y0} A ${r} ${r} 0 ${sweep > Math.PI ? 1 : 0} 1 ${x1} ${y1} Z`}
+            fill={s.color}
+            stroke="#0b1220"
+            strokeWidth="1"
+          />
+        )
+        angle = a1
+      }
+    }
+  }
+
+  return (
+    <div className="flex-1 min-w-0">
+      <div className="text-[10px] text-slate-500 uppercase tracking-wide mb-2">{title}</div>
+      {total === 0 ? (
+        <p className="text-xs text-neutral">No data</p>
+      ) : (
+        <div className="flex items-center gap-3">
+          <svg width="88" height="88" viewBox="0 0 100 100" className="shrink-0">{paths}</svg>
+          <div className="flex flex-col gap-1 text-[10px] min-w-0">
+            {slices.filter(s => s.value > 0).map(s => (
+              <div key={s.label} className="flex items-center gap-1.5 min-w-0">
+                <div className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: s.color }} />
+                <span className="text-slate-300 truncate">
+                  {s.label} <span className="text-neutral">({s.value} · {((s.value / total) * 100).toFixed(0)}%)</span>
+                </span>
+              </div>
+            ))}
+            {centerLabel && <div className="text-[9px] text-slate-600 mt-0.5">{centerLabel}</div>}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 function SentimentDonut({ bullish, bearish, neutral }: { bullish: number; bearish: number; neutral: number }) {
   const total = bullish + bearish + neutral
   if (total === 0) return <p className="text-xs text-neutral">No sentiment data</p>
@@ -195,6 +254,28 @@ function TickerMirrorContent({ ticker, row, onClose }: { ticker: string; row: SR
     newsSubTab === 'twitter' ? `/api/twitter/posts/${ticker}?limit=10` : null,
     fetcher
   )
+  const { data: allStocksData } = useSWR('/api/screener?limit=200', fetcher, { revalidateOnFocus: false })
+
+  const allRows: SR[] = Array.isArray(allStocksData) ? allStocksData : allStocksData?.tickers ?? allStocksData?.rows ?? []
+
+  const breadthSlices: PieSlice[] = [
+    { label: 'Gainers', value: allRows.filter(r => Number(r.change_pct ?? 0) > 0).length,  color: '#10b981' },
+    { label: 'Losers',  value: allRows.filter(r => Number(r.change_pct ?? 0) < 0).length,  color: '#ef4444' },
+    { label: 'Flat',    value: allRows.filter(r => Number(r.change_pct ?? 0) === 0).length, color: '#475569' },
+  ]
+
+  const sectorCounts = new Map<string, number>()
+  for (const r of allRows) {
+    const s = (r.sector || 'Other').trim() || 'Other'
+    sectorCounts.set(s, (sectorCounts.get(s) ?? 0) + 1)
+  }
+  const sortedSectors = [...sectorCounts.entries()].sort((a, b) => b[1] - a[1])
+  const topSectors = sortedSectors.slice(0, 5)
+  const otherCount = sortedSectors.slice(5).reduce((s, [, n]) => s + n, 0)
+  const sectorSlices: PieSlice[] = [
+    ...topSectors.map(([label, value], i) => ({ label, value, color: SECTOR_COLORS[i] })),
+    ...(otherCount > 0 ? [{ label: 'Other', value: otherCount, color: SECTOR_COLORS[5] }] : []),
+  ]
 
   const candles       = chartData?.candles ?? []
   const bollinger     = chartData?.bollinger
@@ -339,6 +420,19 @@ function TickerMirrorContent({ ticker, row, onClose }: { ticker: string; row: SR
               ) : (
                 <TradingViewChart ticker={ticker} interval={interval} height={260} />
               )}
+            </div>
+          </div>
+          <div className="hidden lg:flex w-[520px] shrink-0 p-3 gap-4 flex-col justify-center">
+            <div className="text-[10px] text-slate-500 uppercase tracking-wide -mb-1">All Screener Stocks</div>
+            <div className="flex gap-4">
+              <MiniPie title="Market Breadth" slices={breadthSlices} centerLabel={`${allRows.length} stocks`} />
+              <MiniPie title="Sector Mix" slices={sectorSlices} />
+            </div>
+            <div className="flex gap-4 items-start">
+              <div className="flex-1 min-w-0">
+                <div className="text-[10px] text-slate-500 uppercase tracking-wide mb-2">{ticker} Article Sentiment</div>
+                <SentimentDonut bullish={bullishCount} bearish={bearishCount} neutral={neutralCount} />
+              </div>
             </div>
           </div>
           <div className="w-[200px] shrink-0 p-3">

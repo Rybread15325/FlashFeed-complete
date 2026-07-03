@@ -6515,11 +6515,99 @@ app.get('/api/grok/status', (req, res) => {
 // ── Key Stats: live 52W, Beta, Analyst, Target, Short Float, Earnings ─────────
 // Tries MongoDB first (finviz_screener merged with screeners), then falls back
 // to a live Yahoo Finance quoteSummary fetch so stats are never blank.
+// Yahoo now requires a cookie + crumb pair for quoteSummary from most IPs.
+let _yahooCrumb = null, _yahooCookie = null, _yahooCrumbExpiry = 0
+async function getYahooCrumb() {
+  if (_yahooCrumb && Date.now() < _yahooCrumbExpiry) return { crumb: _yahooCrumb, cookie: _yahooCookie }
+  const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+  try {
+    const cResp = await fetch('https://fc.yahoo.com', {
+      headers: { 'User-Agent': UA },
+      redirect: 'manual',
+      signal: AbortSignal.timeout(8000),
+    }).catch(() => null)
+    const setCookie = cResp?.headers?.get('set-cookie') || ''
+    const cookie = setCookie.split(';')[0] || ''
+    if (!cookie) return null
+    const crumbResp = await fetch('https://query1.finance.yahoo.com/v1/test/getcrumb', {
+      headers: { 'User-Agent': UA, 'Cookie': cookie },
+      signal: AbortSignal.timeout(8000),
+    })
+    if (!crumbResp.ok) return null
+    const crumb = (await crumbResp.text()).trim()
+    if (!crumb || crumb.includes('<')) return null
+    _yahooCrumb = crumb
+    _yahooCookie = cookie
+    _yahooCrumbExpiry = Date.now() + 30 * 60 * 1000
+    return { crumb, cookie }
+  } catch (e) {
+    console.warn('[keystats] Yahoo crumb fetch failed:', e.message)
+    return null
+  }
+}
+
+// Finviz quote page snapshot table — label/value pairs, works without auth
+async function fetchFinvizKeystats(ticker) {
+  const resp = await fetch(`https://finviz.com/quote.ashx?t=${encodeURIComponent(ticker)}&p=d`, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+      'Accept': 'text/html,application/xhtml+xml',
+      'Accept-Language': 'en-US,en;q=0.9',
+    },
+    redirect: 'follow',
+    signal: AbortSignal.timeout(10000),
+  })
+  if (!resp.ok) { console.warn(`[keystats] Finviz HTTP ${resp.status} for ${ticker}`); return null }
+  const html = await resp.text()
+  const pairRe = /<div class="snapshot-td-label">([\s\S]*?)<\/div>[\s\S]*?<div class="snapshot-td-content">([\s\S]*?)<\/div>/g
+  const strip = s => s.replace(/<[^>]+>/g, '').replace(/&amp;/g, '&').trim()
+  const map = {}
+  let m
+  while ((m = pairRe.exec(html)) !== null) {
+    const label = strip(m[1])
+    if (label && map[label] === undefined) map[label] = strip(m[2])
+  }
+  if (!Object.keys(map).length) return null
+
+  const num = v => {
+    if (v == null || v === '-' || v === '') return null
+    const n = parseFloat(String(v).replace(/[%,$]/g, ''))
+    return Number.isFinite(n) ? n : null
+  }
+  const cap = v => {
+    if (!v || v === '-') return null
+    const n = parseFloat(v)
+    if (!Number.isFinite(n)) return null
+    if (/T$/i.test(v)) return n * 1e12
+    if (/B$/i.test(v)) return n * 1e9
+    if (/M$/i.test(v)) return n * 1e6
+    return n
+  }
+  const recomNum = num(map['Recom'])
+  const analyst = recomNum == null ? null
+    : recomNum <= 1.5 ? 'Strong Buy'
+    : recomNum <= 2.5 ? 'Buy'
+    : recomNum <= 3.5 ? 'Hold'
+    : recomNum <= 4.5 ? 'Sell'
+    : 'Strong Sell'
+
+  return {
+    beta:          num(map['Beta']),
+    analyst,
+    target_price:  num(map['Target Price']),
+    float_short:   num(map['Short Float']),
+    earnings_date: map['Earnings'] && map['Earnings'] !== '-' ? map['Earnings'] : null,
+    pe_ratio:      num(map['P/E']),
+    forward_pe:    num(map['Forward P/E']),
+    market_cap:    cap(map['Market Cap']),
+  }
+}
+
 app.get('/api/ticker/:ticker/keystats', async (req, res) => {
   const ticker = String(req.params.ticker || '').toUpperCase().trim().replace(/[^A-Z0-9.\-]/g, '')
   if (!ticker) return res.status(400).json({ ok: false, error: 'ticker required' })
 
-  const cacheKey = `keystats:v1:${ticker}`
+  const cacheKey = `keystats:v2:${ticker}`
   if (redisReady()) {
     try {
       const hit = await redis.get(cacheKey)
@@ -6566,12 +6654,15 @@ app.get('/api/ticker/:ticker/keystats', async (req, res) => {
   const needsLive = !stats || stats.beta == null || stats.analyst == null || stats.target_price == null || stats.float_short == null || stats.earnings_date == null
   if (needsLive) {
     try {
-      const url = `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${ticker}?modules=summaryDetail,defaultKeyStatistics,financialData,calendarEvents`
+      const yc = await getYahooCrumb()
+      const crumbQs = yc ? `&crumb=${encodeURIComponent(yc.crumb)}` : ''
+      const url = `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${ticker}?modules=summaryDetail,defaultKeyStatistics,financialData,calendarEvents${crumbQs}`
       const resp = await fetch(url, {
         headers: {
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
           'Accept': 'application/json',
           'Accept-Language': 'en-US,en;q=0.9',
+          ...(yc ? { 'Cookie': yc.cookie } : {}),
         },
         signal: AbortSignal.timeout(8000),
       })
@@ -6657,13 +6748,41 @@ app.get('/api/ticker/:ticker/keystats', async (req, res) => {
         console.warn(`[keystats] Yahoo Finance v7 error for ${ticker}:`, err.message)
       }
     }
+
+    // Fallback: Finviz quote page — fills whatever is still missing
+    const missingExtended = !stats || stats.beta == null || stats.analyst == null ||
+      stats.target_price == null || stats.float_short == null || stats.earnings_date == null
+    if (missingExtended) {
+      try {
+        const fv = await fetchFinvizKeystats(ticker)
+        if (fv) {
+          const prev = stats || {}
+          stats = {
+            high_52w:      prev.high_52w      ?? null,
+            low_52w:       prev.low_52w       ?? null,
+            beta:          prev.beta          ?? fv.beta,
+            analyst:       prev.analyst       ?? fv.analyst,
+            target_price:  prev.target_price  ?? fv.target_price,
+            float_short:   prev.float_short   ?? fv.float_short,
+            earnings_date: prev.earnings_date ?? fv.earnings_date,
+            pe_ratio:      prev.pe_ratio      ?? fv.pe_ratio,
+            forward_pe:    prev.forward_pe    ?? fv.forward_pe,
+            market_cap:    prev.market_cap    ?? fv.market_cap,
+            _source: prev._source ? `${prev._source}+finviz` : 'finviz',
+          }
+        }
+      } catch (err) {
+        console.warn(`[keystats] Finviz error for ${ticker}:`, err.message)
+      }
+    }
   }
 
   if (!stats) return res.status(404).json({ ok: false, ticker, error: 'No key stats available' })
 
-  // Cache for 30 minutes
+  // Cache complete results for 30 minutes; incomplete ones briefly so retries can fill gaps
+  const isComplete = stats.beta != null || stats.analyst != null || stats.target_price != null
   if (redisReady()) {
-    try { await redis.set(cacheKey, JSON.stringify(stats), 'EX', 1800) } catch (_) {}
+    try { await redis.set(cacheKey, JSON.stringify(stats), 'EX', isComplete ? 1800 : 180) } catch (_) {}
   }
 
   res.json({ ok: true, ticker, ...stats })
@@ -6761,32 +6880,7 @@ app.get('/api/reddit/posts/:ticker', async (req, res) => {
       }
     }
 
-    // 2. PullPush (Pushshift-compatible archive — independent IPs, no Reddit block)
-    try {
-      const after = Math.floor(Date.now() / 1000) - 30 * 86400
-      const q = encodeURIComponent(`$${ticker}`)
-      const ppUrl = `https://api.pullpush.io/reddit/search/submission/?q=${q}&size=${limit * 3}&after=${after}&sort=desc&sort_type=score`
-      const ppResp = await fetch(ppUrl, {
-        headers: { 'User-Agent': 'FlashFeed/1.0 financial-dashboard' },
-        signal: AbortSignal.timeout(10000),
-      })
-      if (ppResp.ok) {
-        const ppData = await ppResp.json()
-        const posts = (ppData.data || [])
-          .filter(d => d && d.id)
-          .slice(0, limit)
-          .map(d => ({
-            id: d.id, title: d.title, subreddit: d.subreddit, author: d.author,
-            score: d.score || 0, num_comments: d.num_comments || 0,
-            url: `https://www.reddit.com/r/${d.subreddit}/comments/${d.id}`,
-            preview: (d.selftext || '').slice(0, 200).trim() || null,
-            created_utc: d.created_utc,
-          }))
-        if (posts.length > 0) return res.json({ ok: true, ticker, posts, source: 'pullpush' })
-      }
-    } catch (_) {}
-
-    // 3. Reddit public JSON — try old.reddit.com and www.reddit.com, with and without $ prefix
+    // 2. Reddit public JSON — try old.reddit.com and www.reddit.com, with and without $ prefix
     for (const domain of ['old.reddit.com', 'www.reddit.com']) {
       for (const rawQ of [`$${ticker}`, ticker]) {
         try {
@@ -6803,7 +6897,56 @@ app.get('/api/reddit/posts/:ticker', async (req, res) => {
       }
     }
 
-    // 4. Reddit RSS — filter strictly for relevance (blocked IPs return generic posts)
+    // 3. Arctic Shift (Pushshift successor — independent infra, no Reddit IP block)
+    try {
+      const asSubs = ['wallstreetbets', 'stocks', 'investing']
+      const asResults = await Promise.allSettled(asSubs.map(sub =>
+        fetch(`https://arctic-shift.photon-reddit.com/api/posts/search?query=${encodeURIComponent(ticker)}&subreddit=${sub}&limit=${limit}&sort=desc`, {
+          headers: { 'User-Agent': 'FlashFeed/1.0 financial-dashboard' },
+          signal: AbortSignal.timeout(8000),
+        }).then(r => (r.ok ? r.json() : null))
+      ))
+      const asPosts = asResults
+        .flatMap(r => (r.status === 'fulfilled' && Array.isArray(r.value?.data) ? r.value.data : []))
+        .filter(d => d && d.id && isRelevant(d.title, d.selftext))
+        .sort((a, b) => (b.created_utc || 0) - (a.created_utc || 0))
+        .slice(0, limit)
+        .map(d => ({
+          id: d.id, title: d.title, subreddit: d.subreddit, author: d.author,
+          score: d.score ?? null, num_comments: d.num_comments ?? null,
+          url: `https://www.reddit.com/r/${d.subreddit}/comments/${d.id}`,
+          preview: (d.selftext || '').slice(0, 200).trim() || null,
+          created_utc: d.created_utc,
+        }))
+      if (asPosts.length > 0) return res.json({ ok: true, ticker, posts: asPosts, source: 'arctic-shift' })
+    } catch (_) {}
+
+    // 4. PullPush archive — may lag weeks/months behind, but real relevant posts
+    for (const rawQ of [`$${ticker}`, ticker]) {
+      try {
+        const q = encodeURIComponent(rawQ)
+        const ppUrl = `https://api.pullpush.io/reddit/search/submission/?q=${q}&size=${limit * 3}&sort=desc&sort_type=created_utc`
+        const ppResp = await fetch(ppUrl, {
+          headers: { 'User-Agent': 'FlashFeed/1.0 financial-dashboard' },
+          signal: AbortSignal.timeout(10000),
+        })
+        if (!ppResp.ok) continue
+        const ppData = await ppResp.json()
+        const posts = (ppData.data || [])
+          .filter(d => d && d.id && isRelevant(d.title, d.selftext))
+          .slice(0, limit)
+          .map(d => ({
+            id: d.id, title: d.title, subreddit: d.subreddit, author: d.author,
+            score: d.score || 0, num_comments: d.num_comments || 0,
+            url: `https://www.reddit.com/r/${d.subreddit}/comments/${d.id}`,
+            preview: (d.selftext || '').slice(0, 200).trim() || null,
+            created_utc: d.created_utc,
+          }))
+        if (posts.length > 0) return res.json({ ok: true, ticker, posts, source: 'pullpush' })
+      } catch (_) {}
+    }
+
+    // 5. Reddit RSS — filter strictly for relevance (blocked IPs return generic posts)
     const entries = await fetchRedditRss(ticker, limit * 3)
     const posts = entries
       .filter(e => isRelevant(e.title))
