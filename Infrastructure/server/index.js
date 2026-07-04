@@ -3588,6 +3588,122 @@ async function fetchApeWisdomTrendsToSocials(db) {
   }
 }
 
+// ── Node-native quote refresher (CNBC public batch quotes) ──────────────────
+// The Python quote pipeline can't run on Railway, which left every price on
+// the site frozen. This mirrors fetch_quotes_to_mongo.py's CNBC mapping.
+function parseCnbcNumber(value) {
+  if (value === null || value === undefined) return null
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null
+  let text = String(value).trim().replace(/[,$%]/g, '').replace(/^\+/, '')
+  if (!text || ['N/A', 'NA', '--'].includes(text.toUpperCase())) return null
+  let mult = 1
+  const suffix = text.slice(-1).toUpperCase()
+  if (['K', 'M', 'B', 'T'].includes(suffix)) {
+    mult = { K: 1e3, M: 1e6, B: 1e9, T: 1e12 }[suffix]
+    text = text.slice(0, -1)
+  }
+  const n = Number(text) * mult
+  return Number.isFinite(n) ? n : null
+}
+
+async function fetchCnbcQuoteRows(symbols) {
+  const url = `https://quote.cnbc.com/quote-html-webservice/restQuote/symbolType/symbol?symbols=${encodeURIComponent(symbols.join('|'))}&requestMethod=itv`
+  const resp = await fetch(url, {
+    headers: { 'User-Agent': 'Mozilla/5.0 FlashFeed/1.0' },
+    signal: AbortSignal.timeout(15000),
+  })
+  if (!resp.ok) throw new Error(`CNBC quotes HTTP ${resp.status}`)
+  const payload = await resp.json()
+  const items = payload?.FormattedQuoteResult?.FormattedQuote || []
+  const rows = []
+  for (const item of items) {
+    const quoteType = String(item.type || '').toUpperCase()
+    const subType = String(item.subType || '').toUpperCase()
+    const symbol = String(item.symbol || '').toUpperCase()
+    if (!symbol || NON_STOCK_TICKERS.has(symbol)) continue
+    if (quoteType !== 'STOCK' || (subType && !subType.includes('COMMON'))) continue
+    const price = parseCnbcNumber(item.last)
+    const previousClose = parseCnbcNumber(item.previous_day_closing)
+    if (price === null) continue
+    let change
+    let changePct
+    if (previousClose && previousClose > 0) {
+      change = price - previousClose
+      changePct = (change / previousClose) * 100
+    } else {
+      change = parseCnbcNumber(item.change)
+      changePct = parseCnbcNumber(item.change_pct)
+      if (change === null || changePct === null) continue
+    }
+    const volume = parseCnbcNumber(item.volume)
+    const avgVolume = parseCnbcNumber(item.tendayavgvol)
+    rows.push({
+      ticker: symbol,
+      price: Number(price.toFixed(4)),
+      change: Number(change.toFixed(4)),
+      change_pct: Number(changePct.toFixed(4)),
+      change_percent: Number(changePct.toFixed(4)),
+      volume: volume !== null ? Math.round(volume) : null,
+      avg_volume: avgVolume !== null ? Math.round(avgVolume) : null,
+      rel_volume: volume !== null && avgVolume ? Number((volume / avgVolume).toFixed(2)) : null,
+      week_52_high: parseCnbcNumber(item.yrhiprice),
+      week_52_low: parseCnbcNumber(item.yrloprice),
+      previous_close: previousClose ? Number(previousClose.toFixed(4)) : null,
+      quote_time: item.last_timedate || item.last_time || null,
+      quote_status: 'priced',
+      quote_source: 'cnbc_public_quote',
+      quote_updated_at: Math.floor(Date.now() / 1000),
+    })
+  }
+  return rows
+}
+
+let _quoteRefresherRunning = false
+async function runNodeQuoteRefresher() {
+  if (_quoteRefresherRunning) return
+  _quoteRefresherRunning = true
+  try {
+    const db = mongoose.connection.db
+    if (!db) return
+    // Stalest quotes first so the whole screener rotates through over a few cycles
+    const docs = await db.collection('screeners')
+      .find({ ticker: { $exists: true, $ne: '' } }, { projection: { ticker: 1 } })
+      .sort({ quote_updated_at: 1 })
+      .limit(Number(process.env.QUOTE_REFRESH_BATCH || 400))
+      .toArray()
+    const tickers = Array.from(new Set(
+      docs.map(d => String(d.ticker || '').toUpperCase()).filter(t => /^[A-Z][A-Z0-9.-]{0,5}$/.test(t))
+    ))
+    if (!tickers.length) return
+    let updated = 0
+    for (let i = 0; i < tickers.length; i += 40) {
+      const chunk = tickers.slice(i, i + 40)
+      let rows = []
+      try {
+        rows = await fetchCnbcQuoteRows(chunk)
+      } catch (err) {
+        console.warn('[quotes] CNBC chunk failed:', err.message)
+        continue
+      }
+      if (!rows.length) continue
+      const ops = rows.map(row => ({
+        updateOne: {
+          filter: { ticker: row.ticker },
+          update: { $set: Object.fromEntries(Object.entries(row).filter(([, v]) => v !== null)) },
+        },
+      }))
+      const result = await db.collection('screeners').bulkWrite(ops, { ordered: false })
+      updated += (result.modifiedCount || 0) + (result.upsertedCount || 0)
+      await new Promise(resolve => setTimeout(resolve, 250))
+    }
+    console.log(`[quotes] refreshed ${updated}/${tickers.length} tickers from CNBC`)
+  } catch (err) {
+    console.error('[quotes] refresh cycle failed:', err.message)
+  } finally {
+    _quoteRefresherRunning = false
+  }
+}
+
 // Collector cycle: top momentum tickers + heavily-traded defaults, all sources.
 // StockTwits allows ~200 unauthenticated req/hr per IP, so a 10-minute cadence
 // with ≤14 tickers stays well inside the limit.
@@ -7417,6 +7533,11 @@ app.listen(PORT, () => {
   cron.schedule('*/10 * * * *', runNodeSocialCollector)
   setTimeout(() => { runNodeSocialCollector() }, 15000)
   console.log('  Cron    →  social collector every 10 min')
+
+  // Node quote refresher: keeps screener prices live without the Python pipeline
+  cron.schedule('*/5 * * * *', runNodeQuoteRefresher)
+  setTimeout(() => { runNodeQuoteRefresher() }, 5000)
+  console.log('  Cron    →  quote refresher every 5 min')
 
   // Auto-save snapshot when the server process exits
   const shutdown = async (signal) => {
