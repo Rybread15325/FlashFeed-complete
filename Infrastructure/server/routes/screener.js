@@ -618,6 +618,7 @@ function enrichScreenerRow(row, articleRow, socialRow, headlineRow, windowOverri
 router.get('/', async (req, res) => {
   try {
     const { sector, signal, orderBy = 'ticker', orderDir = 'asc', limit = 1000, days = 2 } = req.query
+    const preset = String(req.query.preset || '').toLowerCase()
     const windowOverride = req.query.window_minutes ? Number(req.query.window_minutes) : null
     const filter = {
       exchange: { $in: Array.from(US_EXCHANGES) },
@@ -631,7 +632,10 @@ router.get('/', async (req, res) => {
 
     const sort = { [orderBy]: orderDir === 'asc' ? 1 : -1 }
     const requestedLimit = Math.max(1, Math.min(1500, Number(limit || 1000)))
-    let data = (await Screener.find(filter).sort(sort).limit(requestedLimit).lean())
+    // Always fetch the full (capped) universe and slice AFTER ranking —
+    // limiting at the DB truncated alphabetically, so limit=200 consumers
+    // (3D graph, overview pies) only ever saw tickers starting with A–C.
+    let data = (await Screener.find(filter).sort(sort).limit(1500).lean())
       .map(normalizeScreenerRow)
       .filter(isCleanListedUsRow)
 
@@ -661,7 +665,31 @@ router.get('/', async (req, res) => {
         }
       })
       data = data.map(row => enrichScreenerRow(row, articleMap.get(row.ticker), socialMap.get(row.ticker), headlineMap.get(row.ticker), windowOverride))
-      // Sort: rows with fresh articles first, then by article count, then ticker
+    }
+
+    // Rank: preset > explicit column order > fresh news first
+    const presetRules = {
+      top_gainers:    { keep: r => Number(r.change_pct || 0) > 0, cmp: (a, b) => Number(b.change_pct || 0) - Number(a.change_pct || 0) },
+      top_losers:     { keep: r => Number(r.change_pct || 0) < 0, cmp: (a, b) => Number(a.change_pct || 0) - Number(b.change_pct || 0) },
+      unusual_volume: { keep: r => Number(r.rel_volume || 0) >= 1.5 || Number(r.volume || 0) >= 30_000_000, cmp: (a, b) => Number(b.rel_volume || 0) - Number(a.rel_volume || 0) },
+      bullish_news:   { keep: r => Number(r.avg_sentiment || 0) > 0 || Number(r.bullish_count || 0) > 0, cmp: (a, b) => Number(b.avg_sentiment || 0) - Number(a.avg_sentiment || 0) },
+      bearish_news:   { keep: r => Number(r.avg_sentiment || 0) < 0 || Number(r.bearish_count || 0) > 0, cmp: (a, b) => Number(a.avg_sentiment || 0) - Number(b.avg_sentiment || 0) },
+      oversold:       { keep: r => Number(r.rsi || 0) > 0 && Number(r.rsi) <= 35, cmp: (a, b) => Number(a.rsi || 99) - Number(b.rsi || 99) },
+      overbought:     { keep: r => Number(r.rsi || 0) >= 65, cmp: (a, b) => Number(b.rsi || 0) - Number(a.rsi || 0) },
+    }
+    const presetRule = presetRules[preset]
+    if (presetRule) {
+      data = data.filter(presetRule.keep).sort(presetRule.cmp)
+    } else if (orderBy && orderBy !== 'ticker') {
+      const dir = orderDir === 'desc' ? -1 : 1
+      data.sort((a, b) => {
+        const av = a[orderBy]
+        const bv = b[orderBy]
+        if (typeof av === 'string' || typeof bv === 'string') return String(av ?? '').localeCompare(String(bv ?? '')) * dir
+        return (Number(av ?? 0) - Number(bv ?? 0)) * dir
+      })
+    } else {
+      // Rows with fresh articles first, then by article count
       data.sort((a, b) => {
         const ap = a.latest_publish ?? 0
         const bp = b.latest_publish ?? 0
@@ -669,6 +697,7 @@ router.get('/', async (req, res) => {
         return (b.news_article_count ?? 0) - (a.news_article_count ?? 0)
       })
     }
+    data = data.slice(0, requestedLimit)
 
     const activeSocialRows = data.filter(row => Number(row.message_count || 0) > 0)
     const totalSocialMessages = data.reduce((sum, row) => sum + Number(row.message_count || 0), 0)
