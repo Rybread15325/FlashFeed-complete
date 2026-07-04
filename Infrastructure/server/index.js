@@ -2656,7 +2656,22 @@ app.get("/api/prices/:ticker", async (req, res) => {
     if (!db) return res.status(503).json({ ok: false, error: "MongoDB is not connected" })
 
     const ticker = String(req.params.ticker || "").toUpperCase().replace(/[^A-Z0-9.-]/g, "")
-    const doc = await db.collection("screeners").findOne({ ticker })
+    let doc = await db.collection("screeners").findOne({ ticker })
+    // Unknown or stale ticker → pull a live CNBC quote on demand and store it
+    const quoteAgeSec = Math.floor(Date.now() / 1000) - Number(doc?.quote_updated_at || 0)
+    if (ticker && (!doc || !Number.isFinite(Number(doc.price)) || quoteAgeSec > 1800)) {
+      try {
+        const [live] = await fetchCnbcQuoteRows([ticker])
+        if (live) {
+          await db.collection("screeners").updateOne(
+            { ticker },
+            { $set: Object.fromEntries(Object.entries(live).filter(([, v]) => v !== null)) },
+            { upsert: true }
+          )
+          doc = { ...(doc || {}), ...live }
+        }
+      } catch { /* keep whatever is stored */ }
+    }
     const row = normalizeScreenerDoc(doc || { ticker })
     res.json({
       ok: true,
@@ -3198,33 +3213,44 @@ let _yahooCookieStr = null
 let _yahooAuthAt = 0
 const YAHOO_AUTH_TTL_MS = 20 * 60 * 60 * 1000 // 20 hours
 
+let _yahooAuthFailedAt = 0
 async function getYahooCrumb() {
   if (_yahooCrumb && (Date.now() - _yahooAuthAt) < YAHOO_AUTH_TTL_MS) {
     return { crumb: _yahooCrumb, cookie: _yahooCookieStr }
   }
-  const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+  // Yahoo is unreachable from some hosts (Railway): don't pay the connect
+  // timeout on every request — fail fast for 5 min so callers hit fallbacks.
+  if (Date.now() - _yahooAuthFailedAt < 5 * 60 * 1000) {
+    throw new Error('Yahoo auth recently failed; using fallback source')
+  }
+  try {
+    const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 
-  // Step 1: hit Yahoo Finance to get session cookies
-  const r1 = await fetch('https://finance.yahoo.com/', {
-    headers: { 'User-Agent': UA, 'Accept-Language': 'en-US,en;q=0.9' },
-    redirect: 'follow',
-    signal: AbortSignal.timeout(8000),
-  })
-  const rawCookies = r1.headers.getSetCookie?.() ?? (r1.headers.get('set-cookie') ? [r1.headers.get('set-cookie')] : [])
-  const cookieStr = rawCookies.map(c => c.split(';')[0]).join('; ')
+    // Step 1: hit Yahoo Finance to get session cookies
+    const r1 = await fetch('https://finance.yahoo.com/', {
+      headers: { 'User-Agent': UA, 'Accept-Language': 'en-US,en;q=0.9' },
+      redirect: 'follow',
+      signal: AbortSignal.timeout(8000),
+    })
+    const rawCookies = r1.headers.getSetCookie?.() ?? (r1.headers.get('set-cookie') ? [r1.headers.get('set-cookie')] : [])
+    const cookieStr = rawCookies.map(c => c.split(';')[0]).join('; ')
 
-  // Step 2: get crumb
-  const r2 = await fetch('https://query1.finance.yahoo.com/v1/test/getcrumb', {
-    headers: { 'User-Agent': UA, 'Cookie': cookieStr, 'Accept': '*/*' },
-    signal: AbortSignal.timeout(8000),
-  })
-  const crumb = (await r2.text()).trim()
-  if (!crumb || crumb.length < 3) throw new Error('Yahoo crumb fetch failed')
+    // Step 2: get crumb
+    const r2 = await fetch('https://query1.finance.yahoo.com/v1/test/getcrumb', {
+      headers: { 'User-Agent': UA, 'Cookie': cookieStr, 'Accept': '*/*' },
+      signal: AbortSignal.timeout(8000),
+    })
+    const crumb = (await r2.text()).trim()
+    if (!crumb || crumb.length < 3) throw new Error('Yahoo crumb fetch failed')
 
-  _yahooCrumb = crumb
-  _yahooCookieStr = cookieStr
-  _yahooAuthAt = Date.now()
-  return { crumb, cookie: cookieStr }
+    _yahooCrumb = crumb
+    _yahooCookieStr = cookieStr
+    _yahooAuthAt = Date.now()
+    return { crumb, cookie: cookieStr }
+  } catch (err) {
+    _yahooAuthFailedAt = Date.now()
+    throw err
+  }
 }
 
 // Fetch up to 30 recent StockTwits messages for a ticker and upsert into socials.
@@ -3868,6 +3894,80 @@ function parseYahooChartResponse(payload, yahooRange, yahooInterval) {
   return { candles, provider_range: yahooRange, provider_interval: yahooInterval }
 }
 
+// CNBC harmony timeseries — candle fallback for when Yahoo is unreachable
+// from Railway. Range labels over-deliver (e.g. "1M" returns a year of daily
+// bars), so fetch a superset and trim to the requested window.
+function cnbcChartPlan(range, interval) {
+  const r = String(range || '3mo').toLowerCase()
+  const i = String(interval || '1d').toLowerCase()
+  if (i.endsWith('m') || i === '1h') {
+    return r === '1d'
+      ? { cnbcRange: '1D', lastDayOnly: true, cutoffDays: 2 }
+      : { cnbcRange: '5D', lastDayOnly: false, cutoffDays: 9 }
+  }
+  if (r === '1mo') return { cnbcRange: '1Y', lastDayOnly: false, cutoffDays: 32 }
+  if (r === '3mo') return { cnbcRange: '1Y', lastDayOnly: false, cutoffDays: 94 }
+  if (r === '6mo') return { cnbcRange: '1Y', lastDayOnly: false, cutoffDays: 187 }
+  if (r === '1y' || r === 'ytd') return { cnbcRange: '1Y', lastDayOnly: false, cutoffDays: 367 }
+  if (r === '2y') return { cnbcRange: '5Y', lastDayOnly: false, cutoffDays: 733 }
+  if (r === '5y') return { cnbcRange: '5Y', lastDayOnly: false, cutoffDays: 1830 }
+  return { cnbcRange: '1Y', lastDayOnly: false, cutoffDays: 94 }
+}
+
+async function fetchCnbcCandles(ticker, range, interval) {
+  const plan = cnbcChartPlan(range, interval)
+  const url = `https://ts-api.cnbc.com/harmony/app/charts/${plan.cnbcRange}.json?symbol=${encodeURIComponent(ticker)}`
+  const resp = await fetch(url, {
+    headers: { 'User-Agent': 'Mozilla/5.0 FlashFeed/1.0' },
+    signal: AbortSignal.timeout(12000),
+  })
+  if (!resp.ok) throw new Error(`CNBC charts HTTP ${resp.status}`)
+  const payload = await resp.json()
+  const bars = payload?.barData?.priceBars || []
+  if (!bars.length) return { candles: [], provider_range: plan.cnbcRange, provider_interval: interval }
+
+  const lastDay = String(bars[bars.length - 1]?.tradeTime || '').slice(0, 8)
+  const lastSec = Math.floor(Number(bars[bars.length - 1]?.tradeTimeinMills || Date.now()) / 1000)
+  const cutoffSec = lastSec - plan.cutoffDays * 86400
+  const candles = []
+  for (const bar of bars) {
+    if (plan.lastDayOnly && String(bar.tradeTime || '').slice(0, 8) !== lastDay) continue
+    const time = Math.floor(Number(bar.tradeTimeinMills || 0) / 1000)
+    if (!time || time < cutoffSec) continue
+    const open = Number(bar.open)
+    const high = Number(bar.high)
+    const low = Number(bar.low)
+    const close = Number(bar.close)
+    if (![open, high, low, close].every(Number.isFinite)) continue
+    if (open <= 0 || high <= 0 || low <= 0 || close <= 0) continue
+    candles.push({
+      time,
+      open: Number(open.toFixed(4)),
+      high: Number(high.toFixed(4)),
+      low: Number(low.toFixed(4)),
+      close: Number(close.toFixed(4)),
+      volume: Number.isFinite(Number(bar.volume)) ? Number(bar.volume) : 0,
+    })
+  }
+  return { candles, provider_range: `cnbc_${plan.cnbcRange}`, provider_interval: interval }
+}
+
+// Yahoo first (richer intervals), CNBC when Yahoo is blocked or empty
+async function fetchCandlesAnySource(ticker, range, interval) {
+  let yahooError = null
+  try {
+    const result = await fetchYahooCandles(ticker, range, interval)
+    if (result.candles.length) return result
+  } catch (err) {
+    yahooError = err
+  }
+  try {
+    return await fetchCnbcCandles(ticker, range, interval)
+  } catch (err) {
+    throw yahooError || err
+  }
+}
+
 function sma(values, period) {
   return values.map((_, index) => {
     if (index < period - 1) return null
@@ -4161,7 +4261,7 @@ app.get("/api/charts/:ticker", async (req, res) => {
     let priceStatus = "unavailable"
     let priceDetail = ""
     try {
-      candleResult = await fetchYahooCandles(ticker, range, interval)
+      candleResult = await fetchCandlesAnySource(ticker, range, interval)
       priceStatus = candleResult.candles.length ? "working" : "no_bars_returned"
     } catch (err) {
       priceDetail = String(err.message || err)
@@ -4284,7 +4384,7 @@ app.get("/api/correlation/post-news", async (req, res) => {
     const candleMap = new Map()
     await Promise.all(tickers.map(async ticker => {
       try {
-        const result = await fetchYahooCandles(ticker, "5d", "1m")
+        const result = await fetchCandlesAnySource(ticker, "5d", "1m")
         candleMap.set(ticker, result.candles || [])
       } catch {
         candleMap.set(ticker, [])
@@ -5027,23 +5127,28 @@ app.post("/api/social/fetch", async (req, res) => {
   }
 
   try {
-    const result = await runPythonScriptForRoute("1_News/pipeline/fetch_social_to_mongo.py", {
-      timeout: 45000,
-      extraEnv: {
-        SOCIAL_TICKERS: ticker,
-        SOCIAL_MAX_TICKERS: "1",
-        SOCIAL_MAX_WORKERS: "1",
-      },
-    })
-    const counts = parseSocialFetchForRoute(result.stdout || "")
+    // Node collectors instead of the Python pipeline: the Python path can't
+    // reach its sources from Railway and made every Social-page search fail
+    // after a 45s timeout.
+    const db = mongoose.connection.db
+    if (!db) {
+      return res.status(503).json({ ok: false, ticker, error: "MongoDB is not connected", ms: Date.now() - started })
+    }
+    const [stocktwits, reddit, bluesky, x] = await Promise.all([
+      fetchStockTwitsForTicker(db, ticker),
+      fetchRedditForTicker(db, ticker),
+      fetchBlueskyForTicker(db, ticker),
+      fetchTwitterForTicker(db, ticker),
+    ])
 
-    return res.status(result.ok ? 200 : 500).json({
-      ok: result.ok,
+    return res.json({
+      ok: true,
       ticker,
-      ...counts,
-      stdout: result.stdout,
-      stderr: result.stderr,
-      error: result.error,
+      social_new: stocktwits + reddit + bluesky + x,
+      stocktwits_new: stocktwits,
+      reddit_new: reddit,
+      bluesky_new: bluesky,
+      x_new: x,
       ms: Date.now() - started,
     })
   } catch (err) {
