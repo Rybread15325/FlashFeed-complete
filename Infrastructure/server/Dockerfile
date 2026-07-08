@@ -2,12 +2,11 @@ FROM node:22-alpine
 
 WORKDIR /app
 
-# Python support for the real RSS Mongo importer
+# Python support for the real RSS Mongo importer (no Kafka — uses Redis Streams)
 RUN apk add --no-cache python3 python3-dev py3-pip build-base libpq-dev openssl-dev tzdata \
-    librdkafka-dev cyrus-sasl-dev lz4-dev zstd-dev \
   && python3 -m venv /opt/rssvenv \
   && /opt/rssvenv/bin/pip install --upgrade pip setuptools wheel \
-  && /opt/rssvenv/bin/pip install --no-cache-dir pymongo feedparser requests curl_cffi python-dotenv beautifulsoup4 "psycopg[binary]" "confluent-kafka" redis
+  && /opt/rssvenv/bin/pip install --no-cache-dir pymongo feedparser requests curl_cffi python-dotenv beautifulsoup4 "psycopg[binary]" redis
 
 # Install backend deps first for better Docker caching
 COPY Infrastructure/server/package*.json ./
@@ -27,4 +26,4 @@ ENV RSS_STATE_FILE=/tmp/feedflash_rss_fetch_state.json
 
 EXPOSE 3001
 
-CMD ["npm", "run", "dev"]
+CMD ["node", "index.js"]

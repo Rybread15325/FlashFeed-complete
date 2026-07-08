@@ -162,7 +162,7 @@ function normalizeScreenerRow(doc = {}) {
     operating_margin: nullableNumber(doc.operating_margin),
     roe: nullableNumber(doc.roe),
     debt_equity: nullableNumber(doc.debt_equity),
-    beta: nullableNumber(doc.beta),
+    beta: nullableNumber(doc.beta ?? doc.beta_1_year),
     rsi: nullableNumber(doc.rsi),
     sma20: nullableNumber(doc.sma20),
     sma50: nullableNumber(doc.sma50),
@@ -175,17 +175,44 @@ function normalizeScreenerRow(doc = {}) {
     perf_ytd: nullableNumber(doc.perf_ytd),
     atr: nullableNumber(doc.atr),
     gap: nullableNumber(doc.gap),
-    analyst: doc.analyst || null,
-    target_price: nullableFixed(doc.target_price, 2),
+    analyst: doc.analyst || analystRecToLabel(doc.analyst_recom) || null,
+    target_price: nullableFixed(doc.target_price ?? doc.targetMeanPrice ?? doc.targetMedianPrice, 2),
     inst_own: nullableNumber(doc.inst_own),
     insider_own: nullableNumber(doc.insider_own),
-    float_short: nullableNumber(doc.float_short),
+    float_short: nullableNumber(doc.float_short ?? (doc.shortPercentOfFloat != null ? doc.shortPercentOfFloat * 100 : null)),
     earnings_date: doc.earnings_date || null,
     previous_close: nullableFixed(doc.previous_close, 2),
     quote_source: doc.quote_source || null,
     quote_updated_at: doc.quote_updated_at || null,
     quote_status: doc.quote_status || (hasStoredPrice ? 'priced' : 'missing'),
+    high_52w: nullableNumber(doc.high_52w ?? doc.week_52_high ?? doc['52W High'] ?? doc['52w_high'] ?? doc.week52High ?? doc.fiftyTwoWeekHigh),
+    low_52w:  nullableNumber(doc.low_52w  ?? doc.week_52_low  ?? doc['52W Low']  ?? doc['52w_low']  ?? doc.week52Low  ?? doc.fiftyTwoWeekLow),
   }
+}
+
+function analystRecToLabel(rec) {
+  if (rec == null) return null
+  const n = Number(rec)
+  if (!Number.isFinite(n)) return null
+  if (n >= 0.75)  return 'Buy'
+  if (n >= 0.1)   return 'Hold'
+  if (n >= -0.1)  return 'Hold'
+  if (n >= -0.75) return 'Sell'
+  return 'Strong Sell'
+}
+
+async function loadYfinanceEnrichMap(db, tickers) {
+  if (!tickers || !tickers.length) return new Map()
+  try {
+    const docs = await db.collection('finviz_screener').find(
+      { ticker: { $in: tickers } },
+      { projection: { ticker: 1, high_52w: 1, low_52w: 1, week_52_high: 1, week_52_low: 1,
+          fiftyTwoWeekHigh: 1, fiftyTwoWeekLow: 1, beta: 1, beta_1_year: 1,
+          analyst: 1, analyst_recom: 1, target_price: 1, targetMeanPrice: 1,
+          float_short: 1, shortPercentOfFloat: 1, earnings_date: 1, pe_ratio: 1, pe: 1 } }
+    ).toArray()
+    return new Map(docs.map(d => [String(d.ticker || '').toUpperCase(), d]))
+  } catch { return new Map() }
 }
 
 function socialTimeStages() {
@@ -218,6 +245,52 @@ function socialTimeStages() {
       },
     },
   ]
+}
+
+async function loadLatestHeadlinesForTickers(db, tickers) {
+  const wanted = Array.from(new Set(tickers.map(t => String(t || '').toUpperCase()).filter(Boolean)))
+  if (!wanted.length) return new Map()
+
+  const rows = await db.collection('articles').aggregate([
+    {
+      $match: {
+        ticker: { $exists: true, $nin: ['', null] },
+        title: { $exists: true, $ne: '' },
+      },
+    },
+    {
+      $addFields: {
+        _ticker_parts: {
+          $map: {
+            input: { $split: [{ $toUpper: { $toString: '$ticker' } }, ','] },
+            as: 'p',
+            in: { $trim: { input: '$$p' } },
+          },
+        },
+      },
+    },
+    { $unwind: '$_ticker_parts' },
+    { $match: { _ticker_parts: { $in: wanted } } },
+    { $sort: { publish_date: -1 } },
+    {
+      $group: {
+        _id: '$_ticker_parts',
+        title: { $first: '$title' },
+        url: { $first: '$url' },
+        source: { $first: '$source' },
+        publish_date: { $first: '$publish_date' },
+        sentiment: { $first: '$sentiment' },
+      },
+    },
+  ]).toArray()
+
+  return new Map(rows.map(r => [String(r._id || '').toUpperCase(), {
+    title: r.title,
+    url: r.url || null,
+    source: r.source || null,
+    publish_date: r.publish_date || null,
+    sentiment: r.sentiment || null,
+  }]))
 }
 
 async function loadArticleStatsForTickers(db, tickers, days = 2) {
@@ -497,7 +570,7 @@ async function loadAdaptiveSocialStatsForRows(db, rows, windowOverride = null) {
   return new Map(results.map(row => [String(row._id || '').toUpperCase(), row]))
 }
 
-function enrichScreenerRow(row, articleRow, socialRow, windowOverride = null) {
+function enrichScreenerRow(row, articleRow, socialRow, headlineRow, windowOverride = null) {
   const newsScore = articleRow ? sentimentScore(articleRow) : Number(row.structured_sentiment || 0)
   const socialCount = Number(socialRow?.count || 0)
   const socialScore = socialCount ? Number(Number(socialRow.sentiment || 0).toFixed(3)) : Number(row.social_sentiment || 0)
@@ -531,6 +604,13 @@ function enrichScreenerRow(row, articleRow, socialRow, windowOverride = null) {
     sources: [...(articleRow?.sources || []), ...(socialRow?.platforms || []), row.quote_source].filter(Boolean).slice(0, 8),
     latest_publish: articleRow?.latest_publish || null,
     latest_social: socialRow?.latest_post || null,
+    latest_headline: headlineRow ? {
+      title: headlineRow.title,
+      url: headlineRow.url,
+      source: headlineRow.source,
+      publish_date: headlineRow.publish_date,
+      sentiment: headlineRow.sentiment,
+    } : null,
   }
 }
 
@@ -538,6 +618,7 @@ function enrichScreenerRow(row, articleRow, socialRow, windowOverride = null) {
 router.get('/', async (req, res) => {
   try {
     const { sector, signal, orderBy = 'ticker', orderDir = 'asc', limit = 1000, days = 2 } = req.query
+    const preset = String(req.query.preset || '').toLowerCase()
     const windowOverride = req.query.window_minutes ? Number(req.query.window_minutes) : null
     const filter = {
       exchange: { $in: Array.from(US_EXCHANGES) },
@@ -551,18 +632,72 @@ router.get('/', async (req, res) => {
 
     const sort = { [orderBy]: orderDir === 'asc' ? 1 : -1 }
     const requestedLimit = Math.max(1, Math.min(1500, Number(limit || 1000)))
-    let data = (await Screener.find(filter).sort(sort).limit(requestedLimit).lean())
+    // Always fetch the full (capped) universe and slice AFTER ranking —
+    // limiting at the DB truncated alphabetically, so limit=200 consumers
+    // (3D graph, overview pies) only ever saw tickers starting with A–C.
+    let data = (await Screener.find(filter).sort(sort).limit(1500).lean())
       .map(normalizeScreenerRow)
       .filter(isCleanListedUsRow)
 
     if (mongoose.connection.db && data.length) {
       const tickers = data.map(row => row.ticker)
-      const [articleMap, socialMap] = await Promise.all([
+      const [articleMap, socialMap, headlineMap, yfinanceMap] = await Promise.all([
         loadArticleStatsForTickers(mongoose.connection.db, tickers, Number(days || 2)),
         loadAdaptiveSocialStatsForRows(mongoose.connection.db, data, windowOverride),
+        loadLatestHeadlinesForTickers(mongoose.connection.db, tickers),
+        loadYfinanceEnrichMap(mongoose.connection.db, tickers),
       ])
-      data = data.map(row => enrichScreenerRow(row, articleMap.get(row.ticker), socialMap.get(row.ticker), windowOverride))
+      // Merge yfinance enrichment (fills in 52W range, beta, analyst, target, float_short)
+      data = data.map(row => {
+        const yf = yfinanceMap.get(row.ticker)
+        if (!yf) return row
+        const fill = (current, ...candidates) => current != null ? current : candidates.find(v => v != null) ?? null
+        return {
+          ...row,
+          high_52w:     fill(row.high_52w,     nullableNumber(yf.high_52w ?? yf.week_52_high ?? yf.fiftyTwoWeekHigh)),
+          low_52w:      fill(row.low_52w,      nullableNumber(yf.low_52w  ?? yf.week_52_low  ?? yf.fiftyTwoWeekLow)),
+          beta:         fill(row.beta,         nullableNumber(yf.beta ?? yf.beta_1_year)),
+          analyst:      fill(row.analyst,      yf.analyst || analystRecToLabel(yf.analyst_recom)),
+          target_price: fill(row.target_price, nullableNumber(yf.target_price ?? yf.targetMeanPrice)),
+          float_short:  fill(row.float_short,  yf.shortPercentOfFloat != null ? yf.shortPercentOfFloat * 100 : nullableNumber(yf.float_short)),
+          earnings_date:fill(row.earnings_date,yf.earnings_date),
+          pe_ratio:     fill(row.pe_ratio,     nullableNumber(yf.pe_ratio ?? yf.pe)),
+        }
+      })
+      data = data.map(row => enrichScreenerRow(row, articleMap.get(row.ticker), socialMap.get(row.ticker), headlineMap.get(row.ticker), windowOverride))
     }
+
+    // Rank: preset > explicit column order > fresh news first
+    const presetRules = {
+      top_gainers:    { keep: r => Number(r.change_pct || 0) > 0, cmp: (a, b) => Number(b.change_pct || 0) - Number(a.change_pct || 0) },
+      top_losers:     { keep: r => Number(r.change_pct || 0) < 0, cmp: (a, b) => Number(a.change_pct || 0) - Number(b.change_pct || 0) },
+      unusual_volume: { keep: r => Number(r.rel_volume || 0) >= 1.5 || Number(r.volume || 0) >= 30_000_000, cmp: (a, b) => Number(b.rel_volume || 0) - Number(a.rel_volume || 0) },
+      bullish_news:   { keep: r => Number(r.avg_sentiment || 0) > 0 || Number(r.bullish_count || 0) > 0, cmp: (a, b) => Number(b.avg_sentiment || 0) - Number(a.avg_sentiment || 0) },
+      bearish_news:   { keep: r => Number(r.avg_sentiment || 0) < 0 || Number(r.bearish_count || 0) > 0, cmp: (a, b) => Number(a.avg_sentiment || 0) - Number(b.avg_sentiment || 0) },
+      oversold:       { keep: r => Number(r.rsi || 0) > 0 && Number(r.rsi) <= 35, cmp: (a, b) => Number(a.rsi || 99) - Number(b.rsi || 99) },
+      overbought:     { keep: r => Number(r.rsi || 0) >= 65, cmp: (a, b) => Number(b.rsi || 0) - Number(a.rsi || 0) },
+    }
+    const presetRule = presetRules[preset]
+    if (presetRule) {
+      data = data.filter(presetRule.keep).sort(presetRule.cmp)
+    } else if (orderBy && orderBy !== 'ticker') {
+      const dir = orderDir === 'desc' ? -1 : 1
+      data.sort((a, b) => {
+        const av = a[orderBy]
+        const bv = b[orderBy]
+        if (typeof av === 'string' || typeof bv === 'string') return String(av ?? '').localeCompare(String(bv ?? '')) * dir
+        return (Number(av ?? 0) - Number(bv ?? 0)) * dir
+      })
+    } else {
+      // Rows with fresh articles first, then by article count
+      data.sort((a, b) => {
+        const ap = a.latest_publish ?? 0
+        const bp = b.latest_publish ?? 0
+        if (bp !== ap) return bp - ap
+        return (b.news_article_count ?? 0) - (a.news_article_count ?? 0)
+      })
+    }
+    data = data.slice(0, requestedLimit)
 
     const activeSocialRows = data.filter(row => Number(row.message_count || 0) > 0)
     const totalSocialMessages = data.reduce((sum, row) => sum + Number(row.message_count || 0), 0)
