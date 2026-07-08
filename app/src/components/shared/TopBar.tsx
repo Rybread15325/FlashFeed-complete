@@ -20,6 +20,7 @@ const NAV = [
   { href: '/charts', label: 'Charts' },
   { href: '/momentum', label: 'Momentum' },
   { href: '/correlation', label: 'Correlation' },
+  { href: '/rolling', label: 'Rolling' },
   { href: '/settings', label: 'Settings' },
 ]
 
@@ -199,7 +200,7 @@ export function TopBar() {
             <div className="text-neutral text-[10px] mt-1 uppercase tracking-wide">Financial Intelligence</div>
           </NavLink>
 
-          <nav className="hidden xl:flex items-center gap-1 ml-2">
+          <nav className="hidden xl:flex items-center gap-0.5 ml-2">
             {NAV.map(({ href, label }) => {
               const active = pathname === href || pathname.startsWith(`${href}/`)
               return (
@@ -207,7 +208,7 @@ export function TopBar() {
                   key={href}
                   to={href}
                   className={clsx(
-                    'px-3 py-2 text-xs rounded-md border transition-colors',
+                    'px-2 py-1 text-[11px] rounded border transition-colors whitespace-nowrap',
                     active
                       ? 'bg-accent/15 border-accent/50 text-white'
                       : 'border-transparent text-neutral hover:text-white hover:bg-bg/60'
