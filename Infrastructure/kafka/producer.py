@@ -1,47 +1,80 @@
 import logging
-import redis as redis_lib
-from config import REDIS_URL, REDIS_STREAM_NEWS, REDIS_STREAM_SOCIAL, REDIS_STREAM_MAXLEN
+from confluent_kafka import Producer
+
+from config import KAFKA_BOOTSTRAP_SERVERS, KAFKA_TOPIC
 from models import FeedEvent
 
 logger = logging.getLogger(__name__)
 
 
-class StreamProducer:
+class FlashFeedProducer:
     """
-    Publishes FeedEvents to Redis Streams via XADD.
-    Replaces the old Kafka producer — same send/flush interface, no broker needed.
-    Uses the existing Railway Redis instance (REDIS_URL env var).
+    Wraps confluent-kafka's Producer.
 
-    Fetch pipeline  →  StreamProducer.send()  →  Redis Stream (RAM)
-                                               →  StreamConsumer  →  MongoDB (disk)
+    Usage:
+        producer = FlashFeedProducer()
+        event = FeedEvent.create(user_id="u123", event_type="post", payload={...})
+        producer.send(event)
+        producer.flush()          # call once before shutdown
     """
 
     def __init__(self):
-        self._redis = redis_lib.from_url(REDIS_URL, decode_responses=True)
-        self._stream_news   = REDIS_STREAM_NEWS
-        self._stream_social = REDIS_STREAM_SOCIAL
-        self._maxlen = REDIS_STREAM_MAXLEN
+        self._producer = Producer({
+            "bootstrap.servers": KAFKA_BOOTSTRAP_SERVERS,
 
-    def send(self, event: FeedEvent) -> str:
+            # ── Reliability ───────────────────────────────────────────────────
+            # "all" = wait for leader + all in-sync replicas to ack.
+            # Drop to "1" (leader only) if you need lower latency and can
+            # tolerate very rare message loss on broker crash.
+            "acks": "all",
+            "retries": 5,
+            "retry.backoff.ms": 200,
+
+            # ── Throughput ────────────────────────────────────────────────────
+            # Batch messages for up to 10 ms before sending.
+            # Raises latency slightly but dramatically improves throughput.
+            "linger.ms": 10,
+            "batch.size": 65536,    # 64 KB per batch
+
+            # ── Compression (saves network + Kafka disk) ───────────────────────
+            "compression.type": "lz4",
+        })
+
+    # ── Delivery callback ─────────────────────────────────────────────────────
+
+    @staticmethod
+    def _on_delivery(err, msg):
+        if err:
+            logger.error("Delivery failed | topic=%s error=%s", msg.topic(), err)
+        else:
+            logger.debug(
+                "Delivered | topic=%s partition=%d offset=%d",
+                msg.topic(), msg.partition(), msg.offset(),
+            )
+
+    # ── Public API ────────────────────────────────────────────────────────────
+
+    def send(self, event: FeedEvent) -> None:
         """
-        Publish one event to the appropriate Redis Stream.
-        Events with event_type='social' go to the social stream; everything else
-        goes to the news stream.
-        Returns the stream entry ID assigned by Redis.
+        Publish one event to Kafka.
+
+        Partitioned by user_id so that all events for the same user land on
+        the same partition → guaranteed ordering per user.
         """
-        stream = self._stream_social if event.event_type == "social" else self._stream_news
-        msg_id = self._redis.xadd(
-            stream,
-            {"data": event.to_json()},
-            maxlen=self._maxlen,
-            approximate=True,
+        self._producer.produce(
+            topic=KAFKA_TOPIC,
+            key=event.user_id.encode(),     # partition key
+            value=event.to_json().encode(),
+            callback=self._on_delivery,
         )
-        logger.debug("Streamed | stream=%s id=%s event_id=%s", stream, msg_id, event.event_id)
-        return msg_id
+        # Non-blocking poll to fire any pending delivery callbacks.
+        self._producer.poll(0)
 
     def flush(self, timeout: float = 10.0) -> None:
-        """No-op: Redis XADD is synchronous — every send is already persisted in RAM."""
-        pass
+        """Block until all in-flight messages are delivered or timeout expires."""
+        remaining = self._producer.flush(timeout)
+        if remaining:
+            logger.warning("%d message(s) not delivered before flush timeout", remaining)
 
 
 # ── Quick smoke-test ──────────────────────────────────────────────────────────
@@ -50,16 +83,17 @@ if __name__ == "__main__":
     import time
     logging.basicConfig(level=logging.INFO)
 
-    producer = StreamProducer()
+    producer = FlashFeedProducer()
 
     for i in range(5):
         event = FeedEvent.create(
-            user_id=f"user_{i % 3}",
-            event_type="news",
+            user_id=f"user_{i % 3}",          # 3 simulated users
+            event_type="post",
             payload={"title": f"Post #{i}", "body": "Hello FlashFeed!"},
         )
-        msg_id = producer.send(event)
-        logger.info("Queued event_id=%s user_id=%s stream_id=%s", event.event_id, event.user_id, msg_id)
+        producer.send(event)
+        logger.info("Queued event_id=%s user_id=%s", event.event_id, event.user_id)
         time.sleep(0.1)
 
+    producer.flush()
     logger.info("Done.")

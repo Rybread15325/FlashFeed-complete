@@ -63,21 +63,10 @@ def fetch_ticker_data(ticker: str) -> dict | None:
     if market_cap is not None:
         row["market_cap"] = float(market_cap)
     if pe is not None:
-        row["pe_ratio"] = float(pe)
         row["pe"] = float(pe)
     if analyst_recom is not None:
         row["analyst_recom"] = analyst_recom
         row["structured_sentiment"] = analyst_recom
-
-    # Analyst label (canonical string the Node server expects)
-    rec_key = info.get("recommendationKey", "")
-    _analyst_labels = {
-        "strong_buy": "Strong Buy", "buy": "Buy", "hold": "Hold",
-        "underperform": "Sell", "sell": "Strong Sell",
-    }
-    analyst_label = _analyst_labels.get(rec_key)
-    if analyst_label:
-        row["analyst"] = analyst_label
 
     # Additional Finviz-style fields
     change_pct = info.get("regularMarketChangePercent")
@@ -100,42 +89,13 @@ def fetch_ticker_data(ticker: str) -> dict | None:
     if industry:
         row["industry"] = industry
 
-    # 52-week range — store under canonical names the Node server reads
     week_52_high = info.get("fiftyTwoWeekHigh")
     if week_52_high is not None:
-        row["high_52w"] = float(week_52_high)
-        row["week_52_high"] = float(week_52_high)  # legacy alias
+        row["week_52_high"] = float(week_52_high)
 
     week_52_low = info.get("fiftyTwoWeekLow")
     if week_52_low is not None:
-        row["low_52w"] = float(week_52_low)
-        row["week_52_low"] = float(week_52_low)  # legacy alias
-
-    # Beta
-    beta = info.get("beta")
-    if beta is not None:
-        try:
-            row["beta"] = round(float(beta), 3)
-        except (TypeError, ValueError):
-            pass
-
-    # Analyst target price
-    target = info.get("targetMeanPrice") or info.get("targetMedianPrice")
-    if target is not None:
-        try:
-            row["target_price"] = round(float(target), 2)
-            row["targetMeanPrice"] = row["target_price"]
-        except (TypeError, ValueError):
-            pass
-
-    # Short float (yfinance returns 0-1 decimal; multiply by 100 for percent)
-    short_pct = info.get("shortPercentOfFloat")
-    if short_pct is not None:
-        try:
-            row["float_short"] = round(float(short_pct) * 100, 2)
-            row["shortPercentOfFloat"] = float(short_pct)
-        except (TypeError, ValueError):
-            pass
+        row["week_52_low"] = float(week_52_low)
 
     # Next earnings date from calendar
     earnings_date: str | None = None

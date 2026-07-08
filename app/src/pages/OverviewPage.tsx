@@ -3,7 +3,6 @@ import { useMemo } from 'react'
 import { clsx } from 'clsx'
 import type { Article, CorrelationEntry } from '@/lib/types'
 import { getLanguageLabel, useTargetLanguage, useTranslatedText } from '@/lib/translation'
-import { useLanguage } from '@/lib/language'
 
 type SocialPreview = {
   platform?: string
@@ -86,7 +85,7 @@ export function OverviewPage() {
   const targetLanguage = useTargetLanguage()
   const { data: stats } = useSWR('/api/stats?days=2', fetcher, { refreshInterval: 30_000 })
   const { data: status } = useSWR('/api/status', fetcher, { refreshInterval: 30_000 })
-  const { data: articlesData } = useSWR('/api/articles?limit=60&ticker_only=1&recent_days=2', fetcher, { refreshInterval: 15_000 })
+  const { data: articlesData } = useSWR('/api/articles?limit=30&ticker_only=1&recent_days=2', fetcher, { refreshInterval: 15_000 })
   const { data: socialData } = useSWR('/api/social/rolling?window_minutes=1440&limit=30&ranked=1', fetcher, { refreshInterval: 30_000 })
   const { data: aiOverview } = useSWR('/api/ai/overview?days=3', fetcher, { refreshInterval: 60_000 })
   const { data: socialStats } = useSWR('/api/social/rolling/stats?window_minutes=1440', fetcher, { refreshInterval: 30_000 })
@@ -105,36 +104,15 @@ export function OverviewPage() {
 
   const phrases = useMemo(() => {
     const counts = new Map<string, number>()
-    // Only distinctive finance terms — common words (buy/sell/volume) are excluded
-    const FINANCE_TERMS = [
-      'short squeeze', 'gamma squeeze', 'earnings beat', 'earnings miss',
-      'breakout', 'breakdown', 'oversold', 'overbought',
-      'short interest', 'catalyst', 'upgrade', 'downgrade',
-      'buyback', 'dividend', 'merger', 'acquisition', 'FDA approval',
-      'ATH', 'all-time high', 'bull run', 'bear trap', 'dead cat bounce',
-      'guidance raise', 'guidance cut', 'revenue beat', 'short cover',
-    ]
     for (const post of socialPosts) {
-      const pipelineWords = [...(post.finance_keywords || []), ...(post.gossip_keywords || [])]
-      const text = String(post.text || post.title || post.content || '')
-      const lower = text.toLowerCase()
-      // Prefer pipeline-extracted keywords; also scan for $CASHTAGS
-      for (const raw of pipelineWords) {
+      const words = [...(post.finance_keywords || []), ...(post.gossip_keywords || []), ...(post.keywords || [])]
+      for (const raw of words) {
         const key = String(raw || '').trim()
-        if (key.length >= 2) counts.set(key, (counts.get(key) || 0) + 1)
-      }
-      for (const match of text.matchAll(/\$([A-Z]{2,6})\b/g)) {
-        counts.set(match[1], (counts.get(match[1]) || 0) + 1)
-      }
-      for (const term of FINANCE_TERMS) {
-        if (lower.includes(term.toLowerCase())) counts.set(term, (counts.get(term) || 0) + 1)
+        if (key.length < 2) continue
+        counts.set(key, (counts.get(key) || 0) + 1)
       }
     }
-    // Only surface terms mentioned in ≥2 posts to filter noise
-    return Array.from(counts.entries())
-      .filter(([, n]) => n >= 2)
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 12)
+    return Array.from(counts.entries()).sort((a, b) => b[1] - a[1]).slice(0, 10)
   }, [socialPosts])
 
   const bullishArticles = stats?.sentiment?.bullish ?? 0
@@ -179,10 +157,10 @@ export function OverviewPage() {
         ) : null}
       </section>
 
-      <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1.45fr)_minmax(320px,0.9fr)_minmax(300px,0.8fr)] gap-4 items-start">
+      <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1.45fr)_minmax(320px,0.9fr)_minmax(300px,0.8fr)] gap-4">
         <section className="min-w-0 bg-surface border border-border rounded-lg overflow-hidden">
           <SectionTitle title="Ticker-Matched News" meta={`${articles.length} latest · 2d`} />
-          <div className="divide-y divide-slate-700/30 overflow-y-auto">
+          <div className="divide-y divide-slate-700/30 max-h-[640px] overflow-y-auto">
             {articles.length ? articles.map(article => (
               <OverviewArticleRow key={article.id || article.article_id || article.url || article.title} article={article} targetLanguage={targetLanguage} />
             )) : (
@@ -232,8 +210,7 @@ export function OverviewPage() {
             {tickerMentions.length ? tickerMentions.map(row => {
               const bullish = row.bullish ?? 0
               const bearish = row.bearish ?? 0
-              const sentTotal = Math.max(1, bullish + bearish)
-              const hasSentiment = (bullish + bearish) > 0
+              const total = Math.max(1, row.count || 0)
               return (
                 <div key={row.ticker} className="bg-bg/60 border border-border rounded p-2">
                   <div className="flex items-center justify-between gap-2 mb-1">
@@ -241,14 +218,8 @@ export function OverviewPage() {
                     <span className="text-[11px] text-neutral">{compact(row.count)} mentions</span>
                   </div>
                   <div className="flex h-1.5 rounded-full overflow-hidden bg-slate-700">
-                    {hasSentiment ? (
-                      <>
-                        <div className="bg-emerald-500" style={{ width: `${(bullish / sentTotal) * 100}%` }} />
-                        <div className="bg-red-500" style={{ width: `${(bearish / sentTotal) * 100}%` }} />
-                      </>
-                    ) : (
-                      <div className="bg-slate-600 w-full" />
-                    )}
+                    <div className="bg-emerald-500" style={{ width: `${(bullish / total) * 100}%` }} />
+                    <div className="bg-red-500" style={{ width: `${(bearish / total) * 100}%` }} />
                   </div>
                   <div className="flex justify-between text-[10px] text-neutral mt-1">
                     <span className="text-emerald-400">{bullish} bullish</span>
@@ -307,7 +278,7 @@ export function OverviewPage() {
                 </div>
                 <div className="text-xs text-slate-200 line-clamp-2">{row.title || 'Untitled headline'}</div>
                 <div className="text-[10px] text-neutral mt-1 truncate">
-                  {(row.event_type || 'general_news').replace(/_/g, ' ')} · {row.reason || row.source || 'No event phrase matched'}
+                  {(row.event_type || 'general_news').replaceAll('_', ' ')} · {row.reason || row.source || 'No event phrase matched'}
                 </div>
               </div>
             )) : (
@@ -327,9 +298,8 @@ export function OverviewPage() {
   )
 }
 
-function OverviewArticleRow({ article }: { article: Article; targetLanguage?: string }) {
-  const { translated, source } = useTranslatedText(article.title)
-  const { language } = useLanguage()
+function OverviewArticleRow({ article, targetLanguage }: { article: Article; targetLanguage: string }) {
+  const { translated, source } = useTranslatedText(article.title, targetLanguage)
 
   return (
     <a href={article.url || '#'} target="_blank" rel="noreferrer" className="block px-3 py-2 hover:bg-bg/40">
@@ -342,7 +312,7 @@ function OverviewArticleRow({ article }: { article: Article; targetLanguage?: st
       <div className="text-sm text-slate-200 line-clamp-2">{article.title}</div>
       {translated && translated !== article.title && (
         <div className="text-[11px] text-sky-300 line-clamp-2 mt-1">
-          {getLanguageLabel(language)}: {translated}
+          {getLanguageLabel(targetLanguage)}: {translated}
           {source === 'glossary' && <span className="text-neutral"> · glossary</span>}
         </div>
       )}

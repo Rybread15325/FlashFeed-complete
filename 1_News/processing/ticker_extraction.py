@@ -16,8 +16,17 @@ from processing.ticker_data import FALSE_POSITIVE_WORDS, VALID_TICKERS
 
 # Temporary path injection until Phase 2
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'sentiment_analyzer')))
-from db_sqlite import get_engine, execute_update
-from sqlalchemy import text
+# db_sqlite + sqlalchemy are used ONLY by the SQLite write-back helpers below
+# (process_untagged_posts / main). The core extract_tickers() is pure regex and
+# needs neither. Guard the import so a missing db_sqlite (as in the Mongo-only
+# pipeline) does not crash the module import and silently disable ticker tagging.
+try:
+    from db_sqlite import get_engine, execute_update
+    from sqlalchemy import text
+except Exception:  # db_sqlite/sqlalchemy absent — extraction still works
+    get_engine = None
+    execute_update = None
+    text = None
 
 log = logging.getLogger(__name__)
 

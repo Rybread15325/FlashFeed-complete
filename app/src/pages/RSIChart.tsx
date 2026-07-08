@@ -1,6 +1,7 @@
+'use client'
 import { useEffect, useRef } from 'react'
 
-interface Props { data: Array<{ time: string | number; value: number }> }
+interface Props { data: Array<{ time: string; value: number }> }
 
 export function RSIChart({ data }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
@@ -28,11 +29,9 @@ export function RSIChart({ data }: Props) {
       const series = chart.addSeries(LineSeries, { color: '#8b5cf6', lineWidth: 2 })
       series.setData(data as any)
 
-      // Overbought (70) — red dashed
+      // Overbought/oversold lines
       const ob = chart.addSeries(LineSeries, { color: 'rgba(239, 68, 68, 0.4)', lineWidth: 1, lineStyle: 2 })
       ob.setData(data.map(d => ({ time: d.time, value: 70 })) as any)
-
-      // Oversold (30) — green dashed
       const os = chart.addSeries(LineSeries, { color: 'rgba(16, 185, 129, 0.4)', lineWidth: 1, lineStyle: 2 })
       os.setData(data.map(d => ({ time: d.time, value: 30 })) as any)
 

@@ -1,154 +1,93 @@
 'use client'
-import { useState } from 'react'
 import { ScreenerRow } from './ScreenerRow'
 import type { ScreenerRow as SR } from '@/lib/types'
 import type { ViewMode } from './ScreenerPage'
 
-interface Props {
-  rows: SR[]
-  isLoading: boolean
-  viewMode: ViewMode
-  pageOffset?: number
-  onSort?: (key: string) => void
-  sortKey?: string
-  sortDir?: 'asc' | 'desc'
-  pinnedTickers?: string[]
-  onPin?: (row: SR) => void
-}
+interface Props { rows: SR[]; isLoading: boolean; viewMode: ViewMode }
 
-const COLUMNS: Record<ViewMode, Array<{ key: string; label: string; sortable?: boolean }>> = {
+const COLUMNS: Record<ViewMode, Array<{ key: string; label: string }>> = {
   overview: [
-    { key: 'no', label: 'No.' },
-    { key: 'ticker', label: 'Ticker', sortable: true },
-    { key: 'company', label: 'Company' },
-    { key: 'sector', label: 'Sector', sortable: true },
-    { key: 'industry', label: 'Industry', sortable: true },
-    { key: 'country', label: 'Country', sortable: true },
-    { key: 'market_cap', label: 'Market Cap', sortable: true },
-    { key: 'pe_ratio', label: 'P/E', sortable: true },
-    { key: 'price', label: 'Price', sortable: true },
-    { key: 'change_pct', label: 'Change', sortable: true },
-    { key: 'volume', label: 'Volume', sortable: true },
+    { key: 'ticker', label: 'TICKER' },
+    { key: 'company', label: 'COMPANY' },
+    { key: 'exchange', label: 'EXCH' },
+    { key: 'price', label: 'PRICE' },
+    { key: 'change_pct', label: 'CHG%' },
+    { key: 'volume', label: 'VOLUME' },
+    { key: 'rel_volume', label: 'REL VOL' },
+    { key: 'market_cap', label: 'MKT CAP' },
+    { key: 'sector', label: 'SECTOR' },
+    { key: 'structured_sentiment', label: 'NEWS SENT' },
+    { key: 'social_message_sentiment', label: 'ST SENT' },
+    { key: 'social_message_density', label: 'ST DENS' },
+    { key: 'stocktwits_message_count', label: 'ST MSGS' },
+    { key: 'rolling_window_minutes', label: 'WIN' },
   ],
   performance: [
-    { key: 'no', label: 'No.' },
-    { key: 'ticker', label: 'Ticker', sortable: true },
-    { key: 'change_pct', label: 'Change', sortable: true },
-    { key: 'perf_week', label: 'Week', sortable: true },
-    { key: 'perf_month', label: 'Month', sortable: true },
-    { key: 'perf_quarter', label: 'Quarter', sortable: true },
-    { key: 'perf_half', label: 'Half Y', sortable: true },
-    { key: 'perf_year', label: 'Year', sortable: true },
-    { key: 'perf_ytd', label: 'YTD', sortable: true },
+    { key: 'ticker', label: 'TICKER' },
+    { key: 'change_pct', label: 'CHG%' },
+    { key: 'perf_week', label: 'WEEK' },
+    { key: 'perf_month', label: 'MONTH' },
+    { key: 'perf_quarter', label: 'QUARTER' },
+    { key: 'perf_half', label: 'HALF' },
+    { key: 'perf_year', label: 'YEAR' },
+    { key: 'perf_ytd', label: 'YTD' },
   ],
   technical: [
-    { key: 'no', label: 'No.' },
-    { key: 'ticker', label: 'Ticker', sortable: true },
-    { key: 'price', label: 'Price', sortable: true },
-    { key: 'change_pct', label: 'Change', sortable: true },
-    { key: 'volume', label: 'Volume', sortable: true },
-    { key: 'avg_volume', label: 'Avg Vol', sortable: true },
-    { key: 'rel_volume', label: 'Rel Vol', sortable: true },
-    { key: 'rsi', label: 'RSI', sortable: true },
-    { key: 'sma20', label: 'SMA20', sortable: true },
-    { key: 'sma50', label: 'SMA50', sortable: true },
-    { key: 'sma200', label: 'SMA200', sortable: true },
-    { key: 'atr', label: 'ATR', sortable: true },
-    { key: 'gap', label: 'Gap', sortable: true },
+    { key: 'ticker', label: 'TICKER' },
+    { key: 'price', label: 'PRICE' },
+    { key: 'change_pct', label: 'CHG%' },
+    { key: 'volume', label: 'VOLUME' },
+    { key: 'avg_volume', label: 'AVG VOL' },
+    { key: 'rel_volume', label: 'REL VOL' },
+    { key: 'rsi', label: 'RSI' },
+    { key: 'sma20', label: 'SMA20' },
+    { key: 'sma50', label: 'SMA50' },
+    { key: 'sma200', label: 'SMA200' },
+    { key: 'atr', label: 'ATR' },
+    { key: 'gap', label: 'GAP' },
   ],
   sentiment: [
-    { key: 'no', label: 'No.' },
-    { key: 'ticker', label: 'Ticker', sortable: true },
-    { key: 'social_message_sentiment', label: 'ST Sent', sortable: true },
-    { key: 'social_message_density', label: 'ST Dens', sortable: true },
-    { key: 'stocktwits_message_count', label: 'ST Msgs', sortable: true },
-    { key: 'social_sentiment', label: 'All Social', sortable: true },
-    { key: 'message_count', label: 'All Posts', sortable: true },
-    { key: 'rolling_window_minutes', label: 'Window', sortable: true },
-    { key: 'structured_sentiment', label: 'News', sortable: true },
-    { key: 'news_article_count', label: 'Articles', sortable: true },
-    { key: 'bullish_count', label: 'Bull', sortable: true },
-    { key: 'bearish_count', label: 'Bear', sortable: true },
-  ],
-  fundamentals: [
-    { key: 'no', label: 'No.' },
-    { key: 'ticker', label: 'Ticker', sortable: true },
-    { key: 'company', label: 'Company' },
-    { key: 'market_cap', label: 'Mkt Cap', sortable: true },
-    { key: 'pe_ratio', label: 'P/E', sortable: true },
-    { key: 'beta', label: 'Beta', sortable: true },
-    { key: 'target_price', label: 'Target', sortable: true },
-    { key: 'analyst', label: 'Analyst', sortable: true },
-    { key: 'earnings_date', label: 'Earnings', sortable: true },
-    { key: 'float_short', label: 'Short %', sortable: true },
-    { key: 'dividend_yield', label: 'Div %', sortable: true },
+    { key: 'ticker', label: 'TICKER' },
+    { key: 'social_message_sentiment', label: 'ST SENT' },
+    { key: 'social_message_density', label: 'ST DENS' },
+    { key: 'stocktwits_message_count', label: 'ST MSGS' },
+    { key: 'social_sentiment', label: 'ALL SOCIAL' },
+    { key: 'message_count', label: 'ALL POSTS' },
+    { key: 'rolling_window_minutes', label: 'WINDOW' },
+    { key: 'structured_sentiment', label: 'NEWS' },
+    { key: 'news_article_count', label: 'ARTICLES' },
+    { key: 'sources', label: 'SOURCES' },
+    { key: 'bullish_count', label: 'BULL' },
+    { key: 'bearish_count', label: 'BEAR' },
   ],
 }
 
-export function ScreenerTable({ rows, isLoading, viewMode, pageOffset = 0, onSort, sortKey, sortDir, pinnedTickers, onPin }: Props) {
-  const [expandedTickers, setExpandedTickers] = useState<Set<string>>(new Set())
+export function ScreenerTable({ rows, isLoading, viewMode }: Props) {
   const columns = COLUMNS[viewMode]
 
-  const handleExpand = (ticker: string) => {
-    setExpandedTickers(prev => {
-      const next = new Set(prev)
-      if (next.has(ticker)) next.delete(ticker)
-      else next.add(ticker)
-      return next
-    })
-  }
-
-  if (isLoading) {
-    return <div className="text-neutral text-sm animate-pulse p-4">Loading screener data…</div>
-  }
-  if (rows.length === 0) {
-    return (
-      <div className="text-center py-12 text-neutral">
-        <div className="text-2xl mb-2">🔍</div>
-        <div className="text-sm">No tickers match current filters</div>
-      </div>
-    )
-  }
+  if (isLoading) return <div className="text-neutral text-sm animate-pulse p-4">Loading screener data...</div>
+  if (rows.length === 0) return (
+    <div className="text-center py-12 text-neutral">
+      <div className="text-3xl mb-2">🔍</div>
+      <div className="text-sm">No tickers match current filters</div>
+    </div>
+  )
 
   return (
     <div className="bg-surface border border-border rounded-lg overflow-hidden">
       <div className="overflow-x-auto">
         <table className="w-full text-xs">
-          <thead>
-            <tr className="bg-[#0d1b2a] border-b border-border">
+          <thead className="border-b border-border bg-bg/50">
+            <tr>
               {columns.map(col => (
-                <th
-                  key={col.key}
-                  className={`px-2 py-2 text-[10px] text-neutral uppercase tracking-wide font-medium whitespace-nowrap ${
-                    col.key === 'no' ? 'w-8 text-right' : 'text-left'
-                  } ${col.sortable && onSort ? 'cursor-pointer hover:text-white select-none' : ''} ${
-                    sortKey === col.key ? 'text-accent' : ''
-                  }`}
-                  onClick={() => col.sortable && onSort && onSort(col.key)}
-                >
+                <th key={col.key} className="px-2 py-2 text-left text-[10px] text-neutral uppercase tracking-wide font-medium whitespace-nowrap">
                   {col.label}
-                  {sortKey === col.key && (
-                    <span className="ml-0.5 text-accent">{sortDir === 'asc' ? '▲' : '▼'}</span>
-                  )}
                 </th>
               ))}
-              {onPin && <th className="w-6 px-1" />}
             </tr>
           </thead>
-          <tbody className="divide-y divide-slate-700/20">
-            {rows.map((row, i) => (
-              <ScreenerRow
-                key={row.ticker}
-                row={row}
-                columns={columns}
-                rowIndex={pageOffset + i + 1}
-                colSpan={columns.length}
-                expanded={expandedTickers.has(row.ticker)}
-                onExpand={() => handleExpand(row.ticker)}
-                pinned={pinnedTickers?.includes(row.ticker)}
-                onPin={onPin}
-              />
-            ))}
+          <tbody className="divide-y divide-slate-700/30">
+            {rows.map(row => <ScreenerRow key={row.ticker} row={row} columns={columns} />)}
           </tbody>
         </table>
       </div>

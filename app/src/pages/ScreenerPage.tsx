@@ -3,40 +3,17 @@ import useSWR from 'swr'
 import { useState, useMemo } from 'react'
 import { ScreenerTable } from './ScreenerTable'
 import { ScreenerFilterPanel } from './ScreenerFilterPanel'
+import { SignalBar } from './SignalBar'
 import { IntradayChart } from './IntradayChart'
-import { TickerMirror } from './TickerMirror'
-import { OverviewPage } from './OverviewPage'
-import { MomentumPage } from './MomentumPage'
-import { PredictionsPage } from './PredictionsPage'
-import { AIPage } from './AIPage'
-import { NewsPage } from './NewsPage'
-import { ChartsPage } from './ChartsPage'
-import { ChartsGridPage } from './ChartsGridPage'
-import SocialPage from './SocialPage'
 import type { Article, ScreenerRow } from '@/lib/types'
-
-type SubTab = 'screener' | 'overview' | 'movers' | 'predicted' | 'conviction' | 'news' | 'performance' | 'technical' | 'sentiment'
-
-const SUB_TABS: { id: SubTab; label: string }[] = [
-  { id: 'screener',    label: 'Screener' },
-  { id: 'overview',   label: 'Overview' },
-  { id: 'movers',     label: 'Top Movers' },
-  { id: 'predicted',  label: 'Predicted Up Tomorrow' },
-  { id: 'conviction', label: 'High Conviction' },
-  { id: 'news',       label: 'News/Catalysts' },
-  { id: 'performance',label: 'Performance' },
-  { id: 'technical',  label: 'Technical' },
-  { id: 'sentiment',  label: 'Sentiment' },
-]
 
 const fetcher = (url: string) => fetch(url).then(r => r.json())
 
-export type ViewMode = 'overview' | 'performance' | 'technical' | 'sentiment' | 'fundamentals'
+export type ViewMode = 'overview' | 'performance' | 'technical' | 'sentiment'
 type FilterTab = 'descriptive' | 'technical' | 'performance' | 'sentiment' | 'all'
 
-const VIEW_MODES: ViewMode[] = ['overview', 'performance', 'technical', 'sentiment', 'fundamentals']
+const VIEW_MODES: ViewMode[] = ['overview', 'performance', 'technical', 'sentiment']
 const PRESETS = [
-  { key: '', label: 'All' },
   { key: 'top_gainers', label: 'Top Gainers' },
   { key: 'top_losers', label: 'Top Losers' },
   { key: 'unusual_volume', label: 'Unusual Volume' },
@@ -44,15 +21,6 @@ const PRESETS = [
   { key: 'bearish_news', label: 'Bearish News' },
   { key: 'oversold', label: 'Oversold' },
   { key: 'overbought', label: 'Overbought' },
-]
-
-const MARKET_CAP_OPTIONS = [
-  { value: '', label: 'Any' },
-  { value: 'micro', label: 'Micro (<300M)' },
-  { value: 'small', label: 'Small (300M–2B)' },
-  { value: 'mid', label: 'Mid (2B–10B)' },
-  { value: 'large', label: 'Large (10B–200B)' },
-  { value: 'mega', label: 'Mega (>200B)' },
 ]
 
 function compact(n: number | null | undefined) {
@@ -65,7 +33,6 @@ function compact(n: number | null | undefined) {
 }
 
 export function ScreenerPage() {
-  const [subTab, setSubTab] = useState<SubTab>('screener')
   const [socialWindow, setSocialWindow] = useState('adaptive')
   const screenerParams = new URLSearchParams({ limit: '1500' })
   if (socialWindow !== 'adaptive') screenerParams.set('window_minutes', socialWindow)
@@ -81,8 +48,6 @@ export function ScreenerPage() {
   const [search, setSearch] = useState('')
   const [page, setPage] = useState(0)
   const pageSize = 50
-  const [pinnedRows, setPinnedRows] = useState<ScreenerRow[]>([])
-  const [activePinned, setActivePinned] = useState<string | null>(null)
 
   const tickers: ScreenerRow[] = Array.isArray(data) ? data : data?.tickers ?? data?.rows ?? []
 
@@ -314,7 +279,7 @@ export function ScreenerPage() {
   const gainers = filtered.filter(t => (t.change_pct ?? 0) > 0).length
   const losers = filtered.filter(t => (t.change_pct ?? 0) < 0).length
   const unchanged = filtered.filter(t => (t.change_pct ?? 0) === 0).length
-
+  const highRelVol = filtered.filter(t => ((t as any).rel_volume ?? 0) >= 1.5).length
   const activeSocialRows = filtered.filter(t => Number(t.message_count ?? t.stocktwits_message_count ?? 0) > 0)
   const activeSocialCount = activeSocialRows.length
   const totalSocialMessages = filtered.reduce((sum, row) => sum + Number(row.message_count ?? row.stocktwits_message_count ?? 0), 0)
@@ -370,132 +335,16 @@ export function ScreenerPage() {
 
   const resetFilters = () => { setFilters({}); setSignal(''); setSearch(''); setPage(0) }
 
-  const sectors = useMemo(() => [...new Set(tickers.map(t => t.sector).filter(Boolean))].sort() as string[], [tickers])
-  const industries = useMemo(() => [...new Set(tickers.map(t => t.industry).filter(Boolean))].sort() as string[], [tickers])
-  const countries = useMemo(() => [...new Set(tickers.map(t => (t as any).country).filter(Boolean))].sort() as string[], [tickers])
-
-  const handleSort = (key: string) => {
-    if (orderBy === key) {
-      setOrderDir(d => d === 'asc' ? 'desc' : 'asc')
-    } else {
-      setOrderBy(key)
-      setOrderDir(key === 'change_pct' || key === 'volume' ? 'desc' : 'asc')
-    }
-    setPage(0)
-  }
-
-  const selectCls = 'bg-bg border border-border rounded px-2 py-1 text-xs text-neutral hover:border-accent/50 focus:outline-none focus:border-accent transition-colors'
-
-  const subContent: Record<Exclude<SubTab, 'screener'>, JSX.Element> = {
-    overview:    <OverviewPage />,
-    movers:      <MomentumPage />,
-    predicted:   <PredictionsPage />,
-    conviction:  <AIPage />,
-    news:        <NewsPage />,
-    performance: <ChartsPage />,
-    technical:   <ChartsGridPage />,
-    sentiment:   <SocialPage />,
-  }
-
   return (
     <div>
-      {/* Sub-tab bar */}
-      <div className="flex items-center gap-1 overflow-x-auto mb-4 border-b border-border pb-0 [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
-        {SUB_TABS.map(tab => (
-          <button
-            key={tab.id}
-            onClick={() => setSubTab(tab.id)}
-            className={`flex-shrink-0 px-3 py-2 text-xs font-medium border-b-2 -mb-px transition-colors whitespace-nowrap ${
-              subTab === tab.id
-                ? 'text-white border-sky-400'
-                : 'text-neutral border-transparent hover:text-white hover:border-slate-600'
-            }`}
-          >
-            {tab.label}
-          </button>
-        ))}
-      </div>
-
-      {/* Non-screener sub-views */}
-      {subTab !== 'screener' && subContent[subTab]}
-
-      {/* Screener content */}
-      {subTab === 'screener' && <>
-
-      {/* Finviz-style compact toolbar */}
-      <div className="flex items-center gap-1.5 flex-wrap mb-3 bg-surface border border-border rounded-lg px-3 py-2">
-        <select
-          value={signal}
-          onChange={e => {
-            const v = e.target.value
-            setSignal(v)
-            if (v === 'top_losers') { setOrderBy('change_pct'); setOrderDir('asc') }
-            else if (v === 'unusual_volume') { setOrderBy('rel_volume'); setOrderDir('desc') }
-            else if (v) { setOrderBy('change_pct'); setOrderDir('desc') }
-            setPage(0)
-          }}
-          className={selectCls}
-        >
-          {PRESETS.map(p => <option key={p.key} value={p.key}>{p.label}</option>)}
-        </select>
-
-        <select value={(filters as any).exchange || ''} onChange={e => setFilter('exchange', e.target.value)} className={selectCls}>
-          <option value="">Exchange</option>
-          <option value="NASDAQ">NASDAQ</option>
-          <option value="NYSE">NYSE</option>
-          <option value="AMEX">AMEX</option>
-        </select>
-
-        <select value={filters.sector || ''} onChange={e => setFilter('sector', e.target.value)} className={selectCls}>
-          <option value="">Sector</option>
-          {sectors.map(s => <option key={s} value={s}>{s}</option>)}
-        </select>
-
-        <select value={filters.industry || ''} onChange={e => setFilter('industry', e.target.value)} className={selectCls}>
-          <option value="">Industry</option>
-          {industries.map(i => <option key={i} value={i}>{i}</option>)}
-        </select>
-
-        <select value={(filters as any).country || ''} onChange={e => setFilter('country', e.target.value)} className={selectCls}>
-          <option value="">Country</option>
-          {countries.map(c => <option key={c} value={c}>{c}</option>)}
-        </select>
-
-        <select value={filters.market_cap || ''} onChange={e => setFilter('market_cap', e.target.value)} className={selectCls}>
-          {MARKET_CAP_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.value ? `Market Cap: ${o.label}` : 'Market Cap'}</option>)}
-        </select>
-
-        <input
-          value={search}
-          onChange={e => { setSearch(e.target.value); setPage(0) }}
-          placeholder="Ticker / Company…"
-          className="bg-bg border border-border rounded px-2 py-1 text-xs text-neutral placeholder-slate-600 focus:outline-none focus:border-accent w-36"
-        />
-
-        <button
-          onClick={() => setShowFilters(s => !s)}
-          className={`text-xs px-2.5 py-1 rounded border transition-colors ${showFilters ? 'bg-accent/10 border-accent/40 text-accent' : 'border-border text-neutral hover:text-white hover:border-accent/50'}`}
-        >
-          {(() => {
-            const advCount = Object.keys(filters).filter(k => !['exchange','sector','industry','country','market_cap'].includes(k)).length
-            return advCount > 0 ? `More Filters (${advCount})` : 'More Filters'
-          })()}
-        </button>
-
-        {(Object.keys(filters).length > 0 || signal || search) && (
-          <button onClick={resetFilters} className="text-xs text-red-400 hover:text-red-300 px-1">Reset</button>
-        )}
-
-        <button onClick={() => mutate()} className="text-xs px-2.5 py-1 rounded border border-border text-neutral hover:text-white hover:border-accent/50 transition-colors">
-          ↻ Refresh
-        </button>
-
-        <div className="ml-auto flex items-center gap-2">
-          <span className="text-[10px] text-neutral uppercase">Social</span>
+      <div className="flex items-center justify-between gap-3 mb-3">
+        <h1 className="text-white font-semibold text-lg">Market Screener</h1>
+        <div className="flex items-center gap-2">
+          <span className="text-[10px] text-neutral uppercase">Social Window</span>
           <select
             value={socialWindow}
             onChange={event => setSocialWindow(event.target.value)}
-            className={selectCls}
+            className="bg-bg border border-border rounded px-2 py-1 text-xs text-neutral"
           >
             <option value="adaptive">Adaptive</option>
             <option value="5">5m</option>
@@ -505,31 +354,9 @@ export function ScreenerPage() {
             <option value="120">2h</option>
             <option value="1440">24h</option>
           </select>
-          <span className="text-neutral text-xs whitespace-nowrap">{filtered.length} stocks</span>
+          <span className="text-neutral text-sm">{filtered.length} NASDAQ/NYSE/AMEX tickers</span>
         </div>
       </div>
-
-      {/* Active filter pills */}
-      {Object.keys(filters).length > 0 && (
-        <div className="flex items-center gap-1.5 flex-wrap mb-2">
-          {Object.entries(filters).map(([k, v]) => (
-            <span key={k} className="flex items-center gap-1 text-[11px] bg-accent/10 border border-accent/30 text-accent px-2 py-0.5 rounded">
-              {k}: {v}
-              <button onClick={() => setFilter(k, '')} className="hover:text-white ml-0.5 leading-none">&times;</button>
-            </span>
-          ))}
-        </div>
-      )}
-
-      {/* More filters panel */}
-      {showFilters && (
-        <ScreenerFilterPanel
-          filters={filters}
-          setFilter={setFilter}
-          activeTab={filterTab}
-          setActiveTab={setFilterTab}
-        />
-      )}
 
       <div className="grid grid-cols-2 md:grid-cols-5 gap-2 mb-3">
         <ScreenerMetric label="Universe" value={compact(filtered.length)} />
@@ -607,6 +434,62 @@ export function ScreenerPage() {
         ))}
       </div>
 
+      <div className="flex gap-1.5 overflow-x-auto pb-2 mb-2">
+        {PRESETS.map(preset => (
+          <button
+            key={preset.key}
+            onClick={() => {
+              setSignal(signal === preset.key ? '' : preset.key)
+              setOrderBy(preset.key === 'top_losers' ? 'change_pct' : preset.key === 'unusual_volume' ? 'rel_volume' : 'change_pct')
+              setOrderDir(preset.key === 'top_losers' ? 'asc' : 'desc')
+            }}
+            className={`px-2.5 py-1 text-xs rounded border whitespace-nowrap ${signal === preset.key ? 'bg-accent/15 border-accent/50 text-accent' : 'bg-surface border-border text-neutral hover:text-white'}`}
+          >
+            {preset.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Signal bar */}
+      <SignalBar
+        signal={signal} setSignal={setSignal}
+        orderBy={orderBy} setOrderBy={setOrderBy}
+        orderDir={orderDir} setOrderDir={setOrderDir}
+        search={search} setSearch={setSearch}
+        onRefresh={() => mutate()}
+      />
+
+      {/* Filter toggle + active pills */}
+      <div className="flex items-center gap-2 mb-2 flex-wrap">
+        <button
+          onClick={() => setShowFilters(s => !s)}
+          className={`text-xs px-3 py-1.5 rounded border transition-colors ${
+            showFilters ? 'bg-accent/10 border-accent/40 text-accent' : 'border-border text-neutral hover:text-white hover:border-accent'
+          }`}
+        >
+          {showFilters ? '▾ Filters' : '▸ Filters'}
+        </button>
+        {Object.entries(filters).map(([k, v]) => (
+          <span key={k} className="flex items-center gap-1 text-[11px] bg-accent/10 border border-accent/30 text-accent px-2 py-0.5 rounded">
+            {k}: {v}
+            <button onClick={() => setFilter(k, '')} className="hover:text-white ml-0.5">&times;</button>
+          </span>
+        ))}
+        {Object.keys(filters).length > 0 && (
+          <button onClick={resetFilters} className="text-[11px] text-red-400 hover:text-red-300">Clear All</button>
+        )}
+      </div>
+
+      {/* Filter panel */}
+      {showFilters && (
+        <ScreenerFilterPanel
+          filters={filters}
+          setFilter={setFilter}
+          activeTab={filterTab}
+          setActiveTab={setFilterTab}
+        />
+      )}
+
       {/* View mode tabs */}
       <div className="flex items-center gap-1 mb-3 border-b border-border">
         {VIEW_MODES.map(mode => (
@@ -625,28 +508,7 @@ export function ScreenerPage() {
       </div>
 
       {/* Table */}
-      <ScreenerTable
-        rows={paged}
-        isLoading={isLoading}
-        viewMode={viewMode}
-        pageOffset={page * pageSize}
-        onSort={handleSort}
-        sortKey={orderBy}
-        sortDir={orderDir}
-        pinnedTickers={pinnedRows.map(r => r.ticker)}
-        onPin={row => {
-          setPinnedRows(prev => {
-            const already = prev.find(r => r.ticker === row.ticker)
-            if (already) {
-              const next = prev.filter(r => r.ticker !== row.ticker)
-              if (activePinned === row.ticker) setActivePinned(next.length ? next[next.length - 1].ticker : null)
-              return next
-            }
-            setActivePinned(row.ticker)
-            return [...prev, row]
-          })
-        }}
-      />
+      <ScreenerTable rows={paged} isLoading={isLoading} viewMode={viewMode} />
 
       {/* Pagination */}
       {totalPages > 1 && (
@@ -675,69 +537,6 @@ export function ScreenerPage() {
           </div>
         </div>
       )}
-
-      {/* Pinned tickers bottom panel */}
-      {pinnedRows.length > 0 && (
-        <div className="mt-4 border border-border rounded-lg overflow-hidden bg-[#080f1a]">
-          {/* Tab bar */}
-          <div className="flex items-center bg-[#0c1420] border-b border-border/50 overflow-x-auto">
-            <span className="px-3 text-[10px] text-slate-500 uppercase tracking-wide shrink-0">Pinned</span>
-            {pinnedRows.map(row => (
-              <button
-                key={row.ticker}
-                onClick={() => setActivePinned(t => t === row.ticker ? t : row.ticker)}
-                className={`flex items-center gap-1.5 px-3 py-2 text-[11px] font-mono font-semibold whitespace-nowrap border-b-2 -mb-px transition-colors ${
-                  activePinned === row.ticker
-                    ? 'border-accent text-white bg-[#080f1a]'
-                    : 'border-transparent text-neutral hover:text-white'
-                }`}
-              >
-                {row.ticker}
-                {row.change_pct != null && (
-                  <span className={`text-[10px] font-normal ${(row.change_pct ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                    {(row.change_pct ?? 0) >= 0 ? '+' : ''}{row.change_pct.toFixed(1)}%
-                  </span>
-                )}
-                <span
-                  onClick={e => {
-                    e.stopPropagation()
-                    setPinnedRows(prev => {
-                      const next = prev.filter(r => r.ticker !== row.ticker)
-                      if (activePinned === row.ticker) setActivePinned(next.length ? next[next.length - 1].ticker : null)
-                      return next
-                    })
-                  }}
-                  className="ml-1 text-slate-600 hover:text-red-400 cursor-pointer leading-none"
-                >
-                  ×
-                </span>
-              </button>
-            ))}
-          </div>
-
-          {/* Active panel content */}
-          {activePinned && (() => {
-            const pinnedRow = pinnedRows.find(r => r.ticker === activePinned)
-            if (!pinnedRow) return null
-            return (
-              <TickerMirror
-                ticker={activePinned}
-                row={pinnedRow}
-                onClose={() => {
-                  setPinnedRows(prev => {
-                    const next = prev.filter(r => r.ticker !== activePinned)
-                    setActivePinned(next.length ? next[next.length - 1].ticker : null)
-                    return next
-                  })
-                }}
-                asPanel
-              />
-            )
-          })()}
-        </div>
-      )}
-
-      </>}
     </div>
   )
 }

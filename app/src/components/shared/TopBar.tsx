@@ -5,7 +5,6 @@ import { clsx } from 'clsx'
 import { StatusBadge } from './StatusBadge'
 import { useToast } from '@/components/shared/Toast'
 import { SentimentModal } from '@/components/shared/SentimentModal'
-import { useLanguage } from '@/lib/language'
 
 const fetcher = (url: string) => fetch(url).then(r => r.json())
 
@@ -20,7 +19,7 @@ const NAV = [
   { href: '/social', label: 'Social' },
   { href: '/charts', label: 'Charts' },
   { href: '/momentum', label: 'Momentum' },
-  { href: '/3d', label: '3D' },
+  { href: '/correlation', label: 'Correlation' },
   { href: '/settings', label: 'Settings' },
 ]
 
@@ -28,17 +27,17 @@ export function TopBar() {
   const { pathname } = useLocation()
   const { toast } = useToast()
   const { mutate } = useSWRConfig()
-  const { language, setLanguage } = useLanguage()
   const { data: status, mutate: mutateStatus } = useSWR('/api/status', fetcher, { refreshInterval: 30_000 })
   const { data: stats } = useSWR('/api/stats?days=0', fetcher, { refreshInterval: 30_000 })
   const { data: marketStatus } = useSWR('/api/market/status', fetcher, { refreshInterval: 60_000 })
+
   const [fetching, setFetching] = useState(false)
   const [fetchResult, setFetchResult] = useState<{ new_articles?: number; updated_articles?: number; refreshed_articles?: number; unchanged_articles?: number; total_articles?: number; ms?: number } | null>(null)
   const [cooldownRemaining, setCooldownRemaining] = useState(0)
   const [watching, setWatching] = useState(false)
-  const watchInterval = '60'
+  const [watchInterval, setWatchInterval] = useState('60')
   const [fetchMode, setFetchMode] = useState<'fast' | 'full'>('fast')
-  const [, setWatchLines] = useState<Array<{ text: string; type: string; ts: number }>>([])
+  const [watchLines, setWatchLines] = useState<Array<{ text: string; type: string; ts: number }>>([])
   const [showSentiment, setShowSentiment] = useState(false)
   const [lastAutoResult, setLastAutoResult] = useState<{ new?: number; updated?: number; ms?: number; at: number } | null>(null)
   const watchRef = useRef<EventSource | null>(null)
@@ -194,23 +193,21 @@ export function TopBar() {
   return (
     <>
       <header className="bg-surface border-b border-border flex-shrink-0">
-        {/* Main toolbar — padding and gap scale with viewport so zoom works */}
-        <div className="flex items-center gap-1 sm:gap-2 lg:gap-3 px-2 sm:px-3 lg:px-4 py-1.5 sm:py-2">
+        <div className="min-h-14 flex items-center gap-3 px-4 py-2">
           <NavLink to="/overview" className="flex-shrink-0">
-            <div className="text-accent font-bold text-sm sm:text-base lg:text-lg tracking-tight font-mono leading-none">FlashFeed</div>
-            <div className="text-neutral text-[9px] sm:text-[10px] mt-0.5 sm:mt-1 uppercase tracking-wide hidden sm:block">Financial Intelligence</div>
+            <div className="text-accent font-bold text-lg tracking-tight font-mono leading-none">FlashFeed</div>
+            <div className="text-neutral text-[10px] mt-1 uppercase tracking-wide">Financial Intelligence</div>
           </NavLink>
 
-          {/* Desktop nav */}
           <nav className="hidden xl:flex items-center gap-1 ml-2">
-            {NAV.slice(0, -1).map(({ href, label }) => {
+            {NAV.map(({ href, label }) => {
               const active = pathname === href || pathname.startsWith(`${href}/`)
               return (
                 <NavLink
                   key={href}
                   to={href}
                   className={clsx(
-                    'px-2.5 py-1.5 text-xs rounded-md border transition-colors whitespace-nowrap',
+                    'px-3 py-2 text-xs rounded-md border transition-colors',
                     active
                       ? 'bg-accent/15 border-accent/50 text-white'
                       : 'border-transparent text-neutral hover:text-white hover:bg-bg/60'
@@ -220,29 +217,12 @@ export function TopBar() {
                 </NavLink>
               )
             })}
-            <button
-              onClick={() => setShowSentiment(true)}
-              className="px-2.5 py-1.5 text-xs rounded-md border border-transparent text-neutral hover:text-white hover:bg-bg/60 transition-colors whitespace-nowrap"
-            >
-              Sentiment
-            </button>
-            <NavLink
-              to="/settings"
-              className={clsx(
-                'px-2.5 py-1.5 text-xs rounded-md border transition-colors whitespace-nowrap',
-                pathname === '/settings'
-                  ? 'bg-accent/15 border-accent/50 text-white'
-                  : 'border-transparent text-neutral hover:text-white hover:bg-bg/60'
-              )}
-            >
-              Settings
-            </NavLink>
           </nav>
 
           <div className="flex-1" />
 
           {fetchResult && (
-            <span className="hidden xl:inline text-[10px] sm:text-xs text-emerald-400 animate-in whitespace-nowrap">
+            <span className="hidden lg:inline text-xs text-emerald-400 animate-in whitespace-nowrap">
               +{fetchResult.new_articles ?? 0} new{fetchResult.updated_articles !== undefined ? `, ${fetchResult.updated_articles} refreshed` : fetchResult.refreshed_articles !== undefined ? `, ${fetchResult.refreshed_articles} refreshed` : ''} ({((fetchResult.ms ?? 0) / 1000).toFixed(1)}s)
             </span>
           )}
@@ -251,7 +231,7 @@ export function TopBar() {
             onClick={doFetch}
             disabled={fetching || cooldownRemaining > 0}
             title={cooldownRemaining > 0 ? `Fetch available in ${cooldownRemaining}s` : `${fetchMode === 'fast' ? 'Fast trader refresh' : 'Full source refresh'}`}
-            className="px-2 sm:px-3 py-1 sm:py-1.5 bg-accent text-white text-[10px] sm:text-xs font-medium rounded hover:bg-sky-400 disabled:opacity-50 transition-colors whitespace-nowrap"
+            className="px-3 py-1.5 bg-accent text-white text-xs font-medium rounded hover:bg-sky-400 disabled:opacity-50 transition-colors whitespace-nowrap"
           >
             {fetching ? 'Fetching...' : cooldownRemaining > 0 ? `Fetch ${cooldownRemaining}s` : 'Run Now'}
           </button>
@@ -260,9 +240,9 @@ export function TopBar() {
             onClick={saveToDisk}
             disabled={diskSaving}
             title={lastDiskSave ? `Last saved ${diskTimeAgo()} — click to save current data to disk` : 'Save current articles & social data to disk'}
-            className="hidden md:flex items-center gap-1 px-2 sm:px-3 py-1 sm:py-1.5 bg-surface border border-border text-[10px] sm:text-xs font-medium text-neutral rounded hover:text-white hover:border-accent disabled:opacity-50 transition-colors whitespace-nowrap"
+            className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 bg-surface border border-border text-xs font-medium text-neutral rounded hover:text-white hover:border-accent disabled:opacity-50 transition-colors whitespace-nowrap"
           >
-            <svg xmlns="http://www.w3.org/2000/svg" className="w-3 h-3 sm:w-3.5 sm:h-3.5 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <svg xmlns="http://www.w3.org/2000/svg" className="w-3.5 h-3.5 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/>
             </svg>
             {diskSaving ? 'Saving...' : lastDiskSave ? diskTimeAgo() : 'Disk'}
@@ -272,26 +252,43 @@ export function TopBar() {
             value={fetchMode}
             onChange={e => setFetchMode(e.target.value as 'fast' | 'full')}
             disabled={fetching || watching}
-            className="hidden lg:block bg-bg border border-border text-[10px] sm:text-xs text-neutral rounded px-1.5 sm:px-2 py-1 sm:py-1.5 focus:outline-none disabled:opacity-50"
+            className="hidden md:block bg-bg border border-border text-xs text-neutral rounded px-2 py-1.5 focus:outline-none disabled:opacity-50"
             title="Fast refresh is optimized for top movers. Full refresh runs every broader source sweep."
           >
             <option value="fast">Fast</option>
             <option value="full">Full</option>
           </select>
 
+          <div className="hidden md:flex items-stretch">
+            <select
+              value={watchInterval}
+              onChange={e => setWatchInterval(e.target.value)}
+              disabled={watching}
+              className="bg-bg border border-border border-r-0 text-xs text-neutral rounded-l px-2 py-1.5 focus:outline-none disabled:opacity-50"
+            >
+              <option value="60">1m</option>
+            </select>
+            <button
+              onClick={toggleWatch}
+              className={`px-3 py-1.5 text-xs font-medium rounded-r border transition-colors ${
+                watching
+                  ? 'bg-emerald-500/20 border-emerald-500/50 text-emerald-400'
+                  : 'bg-surface border-border text-neutral hover:text-white hover:border-accent'
+              }`}
+              title={watching ? 'Stop auto-watch' : 'Start auto-watch'}
+            >
+              {watching ? 'Stop' : 'Auto'}
+            </button>
+          </div>
+
           <button
-            onClick={toggleWatch}
-            className={`hidden lg:flex px-2 sm:px-3 py-1 sm:py-1.5 text-[10px] sm:text-xs font-medium rounded border transition-colors ${
-              watching
-                ? 'bg-emerald-500/20 border-emerald-500/50 text-emerald-400'
-                : 'bg-surface border-border text-neutral hover:text-white hover:border-accent'
-            }`}
-            title={watching ? 'Stop auto-watch' : 'Start auto-watch (every 60s)'}
+            onClick={() => setShowSentiment(true)}
+            className="hidden lg:inline-flex px-3 py-1.5 text-xs font-medium rounded border border-border text-neutral hover:text-white hover:border-accent transition-colors"
           >
-            {watching ? 'Stop' : 'Auto'}
+            Sentiment
           </button>
 
-          <div className="hidden sm:flex items-center gap-1 sm:gap-2">
+          <div className="hidden sm:flex items-center gap-2">
             {(status || stats) && <StatusBadge ok={status?.ok !== false} label={`${stats?.total_all ?? status?.database?.total_all ?? status?.database?.articles ?? 0} articles`} />}
             {marketStatus && <StatusBadge ok={marketStatus.open} label={marketStatus.label || (marketStatus.open ? 'Market Open' : 'Market Closed')} />}
             {watching && <StatusBadge ok={true} label={`Auto ${watchInterval}s`} />}
@@ -304,7 +301,6 @@ export function TopBar() {
           </div>
         </div>
 
-        {/* Mobile / compact nav — scrollable, shown when desktop nav is hidden */}
         <nav className="xl:hidden flex items-center gap-1 overflow-x-auto px-4 pb-2">
           {NAV.map(({ href, label }) => {
             const active = pathname === href || pathname.startsWith(`${href}/`)
@@ -313,7 +309,7 @@ export function TopBar() {
                 key={href}
                 to={href}
                 className={clsx(
-                  'flex-shrink-0 px-3 py-1.5 text-xs rounded-md border transition-colors whitespace-nowrap',
+                  'flex-shrink-0 px-3 py-1.5 text-xs rounded-md border transition-colors',
                   active
                     ? 'bg-accent/15 border-accent/50 text-white'
                     : 'border-border text-neutral hover:text-white'

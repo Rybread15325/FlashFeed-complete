@@ -1,56 +1,78 @@
 """
-FlashFeed stream consumer
-──────────────────────────
-Redis Streams  →  batch read  →  Redis (RAM, hot data ZSet + Hash)
-                              →  MongoDB (disk, persistent)
+FlashFeed consumer pipeline
+────────────────────────────
+Kafka topic  →  batch read  →  Redis (RAM, hot data)
+                            →  MongoDB (disk, persistent)
 
-The consumer group tracks the last-delivered-id inside Redis itself.
-XACK is called ONLY after both stores succeed, so no event is ever
-silently dropped on a crash or restart — Redis will redeliver unacked
-messages to the next available consumer on reconnect.
+Kafka offset is committed ONLY after both stores succeed, so no event is
+ever silently dropped on a crash or restart.
 """
 import json
 import logging
-import socket
 from datetime import datetime, timezone
 
 import redis as redis_lib
+from confluent_kafka import Consumer, KafkaError
 from pymongo import MongoClient, UpdateOne, DESCENDING
 
 from config import (
-    REDIS_URL, REDIS_STREAM_NEWS, REDIS_STREAM_SOCIAL, REDIS_CONSUMER_GROUP,
-    REDIS_TTL, REDIS_FEED_MAX,
+    KAFKA_BOOTSTRAP_SERVERS, KAFKA_TOPIC, KAFKA_GROUP_ID,
+    REDIS_HOST, REDIS_PORT, REDIS_TTL, REDIS_FEED_MAX,
     MONGODB_URI, MONGODB_DB, MONGODB_COLLECTION,
 )
 from models import FeedEvent
 
 logger = logging.getLogger(__name__)
 
-_STREAMS = [REDIS_STREAM_NEWS, REDIS_STREAM_SOCIAL]
 
-
-class StreamConsumer:
+class FlashFeedConsumer:
     """
-    Consumes events from Redis Streams and fans them out to:
-      - Redis ZSet/Hash hot-data structures (microsecond reads)
-      - MongoDB for long-term persistence
+    Consumes events from Kafka and fans them out to Redis and MongoDB.
 
-    Redis hot-data model
-    ────────────────────
+    Redis data model
+    ────────────────
     Hash  "event:{event_id}"  → all event fields (TTL = REDIS_TTL seconds)
     ZSet  "feed:{user_id}"    → {event_id: unix_timestamp_score}
           • ordered by time, newest first via ZREVRANGE
           • trimmed to the most recent REDIS_FEED_MAX events per user
+          • same TTL as the hash
+
+    MongoDB data model
+    ──────────────────
+    Collection  "events"
+    Indexes: event_id (unique), user_id, timestamp DESC
+    Writes are upserts keyed on event_id — idempotent if a message is
+    redelivered.
     """
 
-    def __init__(self):
-        self._redis = redis_lib.from_url(REDIS_URL, decode_responses=True)
-        self._consumer_name = socket.gethostname()
+    # ── Init ──────────────────────────────────────────────────────────────────
 
+    def __init__(self):
+        # Kafka consumer
+        self._consumer = Consumer({
+            "bootstrap.servers": KAFKA_BOOTSTRAP_SERVERS,
+            "group.id": KAFKA_GROUP_ID,
+            "auto.offset.reset": "earliest",
+            # Manual commits — we commit only after a successful write to
+            # both Redis and MongoDB.
+            "enable.auto.commit": False,
+            # Fetch up to 10 MB per partition per request for throughput.
+            "fetch.max.bytes": 10_485_760,
+        })
+
+        # Redis connection (thread-safe pool under the hood)
+        self._redis = redis_lib.Redis(
+            host=REDIS_HOST,
+            port=REDIS_PORT,
+            decode_responses=True,
+            socket_timeout=5,
+            socket_connect_timeout=5,
+        )
+
+        # MongoDB connection
         self._mongo_client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5_000)
         self._collection = self._mongo_client[MONGODB_DB][MONGODB_COLLECTION]
         self._setup_mongo_indexes()
-        self._setup_consumer_groups()
 
     def _setup_mongo_indexes(self) -> None:
         self._collection.create_index("event_id", unique=True)
@@ -58,97 +80,108 @@ class StreamConsumer:
         self._collection.create_index([("timestamp", DESCENDING)])
         logger.info("MongoDB indexes ready.")
 
-    def _setup_consumer_groups(self) -> None:
-        for stream in _STREAMS:
-            try:
-                # id="$" means: only deliver messages that arrive AFTER this consumer
-                # group is created (we don't replay history on fresh start).
-                self._redis.xgroup_create(stream, REDIS_CONSUMER_GROUP, id="$", mkstream=True)
-                logger.info("Consumer group '%s' created for stream '%s'.", REDIS_CONSUMER_GROUP, stream)
-            except redis_lib.exceptions.ResponseError as e:
-                if "BUSYGROUP" in str(e):
-                    logger.debug("Consumer group '%s' already exists for '%s'.", REDIS_CONSUMER_GROUP, stream)
-                else:
-                    raise
-
-    # ── Redis hot-data writes ─────────────────────────────────────────────────
+    # ── Redis writes ──────────────────────────────────────────────────────────
 
     def _write_to_redis(self, events: list[FeedEvent]) -> None:
+        """
+        Batch-write all events to Redis using a single pipeline.
+
+        Pipeline sends all commands to Redis in one round-trip, so latency
+        stays flat whether you're writing 1 event or 1 000.
+        """
         pipe = self._redis.pipeline(transaction=False)
+
         for e in events:
+            # 1. Store the full event as a flat hash (payload JSON-encoded).
             pipe.hset(f"event:{e.event_id}", mapping=e.to_redis_hash())
             pipe.expire(f"event:{e.event_id}", REDIS_TTL)
+
+            # 2. Add to the user's feed sorted set, scored by timestamp.
             score = datetime.fromisoformat(e.timestamp).timestamp()
             pipe.zadd(f"feed:{e.user_id}", {e.event_id: score})
             pipe.expire(f"feed:{e.user_id}", REDIS_TTL)
+
+            # 3. Trim to the most recent REDIS_FEED_MAX events per user.
+            #    ZREMRANGEBYRANK removes the oldest entries (rank 0 … N-MAX-1).
             pipe.zremrangebyrank(f"feed:{e.user_id}", 0, -(REDIS_FEED_MAX + 1))
+
         pipe.execute()
         logger.info("Redis: wrote %d events.", len(events))
 
     # ── MongoDB writes ────────────────────────────────────────────────────────
 
     def _write_to_mongo(self, events: list[FeedEvent]) -> None:
+        """
+        Bulk-upsert all events in a single MongoDB round-trip.
+
+        ordered=False lets MongoDB continue on individual document errors
+        (e.g. a duplicate key on retry) instead of aborting the whole batch.
+        """
         ops = [
-            UpdateOne({"event_id": e.event_id}, {"$set": e.to_dict()}, upsert=True)
+            UpdateOne(
+                {"event_id": e.event_id},
+                {"$set": e.to_dict()},
+                upsert=True,
+            )
             for e in events
         ]
         result = self._collection.bulk_write(ops, ordered=False)
-        logger.info("MongoDB: upserted=%d modified=%d", result.upserted_count, result.modified_count)
+        logger.info(
+            "MongoDB: upserted=%d modified=%d",
+            result.upserted_count, result.modified_count,
+        )
 
     # ── Main loop ─────────────────────────────────────────────────────────────
 
     def run(self, batch_size: int = 50) -> None:
         """
-        Poll both Redis Streams via XREADGROUP in batches.
-        Runs until KeyboardInterrupt.
+        Poll Kafka in batches of `batch_size` messages, write to both stores,
+        then commit. Runs until KeyboardInterrupt or a fatal Kafka error.
         """
-        stream_ids = {s: ">" for s in _STREAMS}
-        logger.info(
-            "Consuming from streams %s (group '%s', consumer '%s')…",
-            _STREAMS, REDIS_CONSUMER_GROUP, self._consumer_name,
-        )
+        self._consumer.subscribe([KAFKA_TOPIC])
+        logger.info("Consuming from topic '%s' (group '%s')…", KAFKA_TOPIC, KAFKA_GROUP_ID)
 
         try:
             while True:
-                raw = self._redis.xreadgroup(
-                    REDIS_CONSUMER_GROUP,
-                    self._consumer_name,
-                    stream_ids,
-                    count=batch_size,
-                    block=1000,  # block up to 1 s for new messages
+                # consume() blocks up to 1 second if the topic is quiet.
+                raw_messages = self._consumer.consume(
+                    num_messages=batch_size, timeout=1.0
                 )
-                if not raw:
+                if not raw_messages:
                     continue
 
-                for stream_name, messages in raw:
-                    msg_ids = []
-                    events: list[FeedEvent] = []
-
-                    for msg_id, fields in messages:
-                        try:
-                            events.append(FeedEvent.from_json(fields["data"]))
-                            msg_ids.append(msg_id)
-                        except Exception as exc:
-                            logger.error("Failed to parse message %s: %s", msg_id, exc)
-
-                    if not events:
+                # ── Parse ──────────────────────────────────────────────────────
+                events: list[FeedEvent] = []
+                for msg in raw_messages:
+                    if msg.error():
+                        code = msg.error().code()
+                        if code != KafkaError._PARTITION_EOF:
+                            logger.error("Kafka error: %s", msg.error())
                         continue
-
                     try:
-                        self._write_to_redis(events)
-                        self._write_to_mongo(events)
-                        # Ack AFTER both stores succeed — safe replay on crash.
-                        self._redis.xack(stream_name, REDIS_CONSUMER_GROUP, *msg_ids)
-                        logger.info("Batch of %d from '%s' acked.", len(events), stream_name)
+                        events.append(FeedEvent.from_json(msg.value().decode()))
                     except Exception as exc:
-                        logger.error(
-                            "Write error — batch NOT acked, will be redelivered: %s",
-                            exc, exc_info=True,
-                        )
+                        logger.error("Failed to parse message: %s", exc)
+
+                if not events:
+                    continue
+
+                # ── Write to both stores, then commit ─────────────────────────
+                try:
+                    self._write_to_redis(events)
+                    self._write_to_mongo(events)
+                    # Commit after BOTH writes succeed — safe replay if we crash.
+                    self._consumer.commit(asynchronous=False)
+                    logger.info("Batch of %d committed.", len(events))
+
+                except Exception as exc:
+                    # Don't commit — Kafka will redeliver this batch on restart.
+                    logger.error("Write error (batch NOT committed): %s", exc, exc_info=True)
 
         except KeyboardInterrupt:
             logger.info("Shutting down consumer…")
         finally:
+            self._consumer.close()
             self._mongo_client.close()
 
     # ── Read path (cache-aside) ───────────────────────────────────────────────
@@ -156,15 +189,21 @@ class StreamConsumer:
     def get_user_feed(self, user_id: str, limit: int = 20) -> list[dict]:
         """
         Fetch the latest `limit` events for a user.
-        1. Try Redis ZSet/Hash hot path (microseconds).
-        2. Fall back to MongoDB on a cold-start cache miss (milliseconds).
+
+        Cache-aside pattern:
+          1. Try Redis first (microseconds, data lives in RAM).
+          2. On a cold-start cache miss, fall back to MongoDB and return raw dicts.
+
+        Call this from your FlashFeed API layer, not from the consumer loop.
         """
+        # Step 1 — Redis fast path (newest first via ZREVRANGE)
         event_ids = self._redis.zrevrange(f"feed:{user_id}", 0, limit - 1)
         if event_ids:
             pipe = self._redis.pipeline(transaction=False)
             for eid in event_ids:
                 pipe.hgetall(f"event:{eid}")
             results = pipe.execute()
+            # Deserialise payload back to dict
             feed = []
             for h in results:
                 if h:
@@ -173,6 +212,7 @@ class StreamConsumer:
             logger.debug("Redis hit for user %s (%d events).", user_id, len(feed))
             return feed
 
+        # Step 2 — MongoDB fallback (milliseconds)
         logger.info("Cache miss for user %s — reading from MongoDB.", user_id)
         return list(
             self._collection
@@ -189,5 +229,5 @@ if __name__ == "__main__":
         level=logging.INFO,
         format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
     )
-    consumer = StreamConsumer()
+    consumer = FlashFeedConsumer()
     consumer.run(batch_size=50)

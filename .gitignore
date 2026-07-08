@@ -16,3 +16,9 @@ logs/
 *.zip
 .rss_fetch_state.json
 .DS_Store
+
+# ruflo runtime artifact (root + chart-service/ copies) - never commit
+ruvector.db
+
+# chart-service point-in-time SQLite social snapshot (real data, phase 2) - never commit
+social_snapshot.db

@@ -36,23 +36,10 @@ def _strip_html(text: str) -> str:
     return re.sub(r"<[^>]+>", "", text or "").strip()
 
 
-def _sentiment_to_score(sentiment_str: str | None) -> float | None:
-    """Convert StockTwits sentiment string to numeric score for rolling_windows pipeline."""
-    if not sentiment_str:
-        return None
-    s = sentiment_str.lower().strip()
-    if s in ('bullish', 'positive', 'up'):
-        return 0.5
-    elif s in ('bearish', 'negative', 'down'):
-        return -0.5
-    return 0.0
-
-
 def scrape_ticker(ticker: str, session: Optional[requests.Session] = None) -> list[dict]:
     """
     Fetch the most recent posts for one ticker.
-    Returns posts in the normalized format the backend pipeline expects:
-    {id, tickers_mentioned, text, published_at, sentiment_score, is_duplicate, source}
+    Returns normalized post dicts.
     """
     req = session or requests
     url = BASE_URL.format(ticker=ticker.upper())
@@ -81,13 +68,15 @@ def scrape_ticker(ticker: str, session: Optional[requests.Session] = None) -> li
             continue
 
         # Stocktwits provides sentiment as {"basic": "Bullish"} or None
-        st_sentiment_str = None
+        st_sentiment = None
         entities = msg.get("entities") or {}
         sentiment_obj = entities.get("sentiment") or msg.get("sentiment")
         if isinstance(sentiment_obj, dict):
             raw = (sentiment_obj.get("basic") or "").lower()
-            if raw in ("bullish", "bearish"):
-                st_sentiment_str = raw
+            if raw == "bullish":
+                st_sentiment = "bullish"
+            elif raw == "bearish":
+                st_sentiment = "bearish"
 
         # Parse created_at → unix timestamp
         created_ts = now
@@ -104,25 +93,14 @@ def scrape_ticker(ticker: str, session: Optional[requests.Session] = None) -> li
                 pass
 
         user = msg.get("user") or {}
-
-        # Normalize sentiment to score
-        sentiment_score = _sentiment_to_score(st_sentiment_str)
-
         posts.append({
-            "id":               _post_id(ticker, msg.get("id", body)),
-            "tickers_mentioned": [ticker.upper()],
-            "text":             body[:1000],
-            "body":             body[:1000],
-            "ticker":           ticker.upper(),
-            "published_at":     created_ts,
-            "created_at":       created_ts,
-            "fetched_at":       now,
-            "sentiment_score":  sentiment_score,
-            "sentiment":        st_sentiment_str,
-            "is_duplicate":     False,
-            "source":           "stocktwits",
-            "platform":         "stocktwits",
-            "author":           user.get("username", ""),
+            "id":         _post_id(ticker, msg.get("id", body)),
+            "ticker":     ticker.upper(),
+            "body":       body[:1000],
+            "author":     user.get("username", ""),
+            "sentiment":  st_sentiment,
+            "created_at": created_ts,
+            "fetched_at": now,
         })
 
     return posts

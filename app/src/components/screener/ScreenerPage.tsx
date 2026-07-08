@@ -87,29 +87,29 @@ export function ScreenerPage() {
     if (filters.social_sentiment) {
       const ss = filters.social_sentiment
       rows = rows.filter(t => {
-        if (ss === 'bullish') return (t.social_sentiment ?? 0) >= 0.2
-        if (ss === 'bearish') return (t.social_sentiment ?? 0) <= -0.2
-        if (ss === 'neutral') return (t.social_sentiment ?? 0) > -0.2 && (t.social_sentiment ?? 0) < 0.2
+        if (ss === 'bullish') return t.social_sentiment >= 0.2
+        if (ss === 'bearish') return t.social_sentiment <= -0.2
+        if (ss === 'neutral') return t.social_sentiment > -0.2 && t.social_sentiment < 0.2
         return true
       })
     }
     if (filters.news_sentiment) {
       const ns = filters.news_sentiment
       rows = rows.filter(t => {
-        if (ns === 'bullish') return (t.structured_sentiment ?? 0) >= 0.2
-        if (ns === 'bearish') return (t.structured_sentiment ?? 0) <= -0.2
-        if (ns === 'neutral') return (t.structured_sentiment ?? 0) > -0.2 && (t.structured_sentiment ?? 0) < 0.2
+        if (ns === 'bullish') return t.structured_sentiment >= 0.2
+        if (ns === 'bearish') return t.structured_sentiment <= -0.2
+        if (ns === 'neutral') return t.structured_sentiment > -0.2 && t.structured_sentiment < 0.2
         return true
       })
     }
     if (filters.min_posts) {
       const mp = parseInt(filters.min_posts)
-      rows = rows.filter(t => (t.message_count ?? 0) >= mp)
+      rows = rows.filter(t => t.message_count >= mp)
     }
 
     // Signal
-    if (signal === 'social_bullish') rows = rows.filter(t => (t.social_sentiment ?? 0) >= 0.3)
-    if (signal === 'social_bearish') rows = rows.filter(t => (t.social_sentiment ?? 0) <= -0.3)
+    if (signal === 'social_bullish') rows = rows.filter(t => t.social_sentiment >= 0.3)
+    if (signal === 'social_bearish') rows = rows.filter(t => t.social_sentiment <= -0.3)
     if (signal === 'unusual_volume') rows = rows.filter(t => (t.volume ?? 0) > ((t as any).avg_volume ?? 1) * 2)
 
     // Sort

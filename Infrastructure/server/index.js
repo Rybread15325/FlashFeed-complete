@@ -7,14 +7,12 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { connectDB } from './db.js'
 import Redis from 'ioredis'
-import cron from 'node-cron'
 
 import articlesRouter    from './routes/articles.js'
 import screenerRouter    from './routes/screener.js'
 import socialRouter      from './routes/social.js'
 import correlationRouter from './routes/correlation.js'
 import settingsRouter    from './routes/settings.js'
-import decisionMapRouter from './routes/decisionMap.js'
 
 const app  = express()
 const PORT = process.env.PORT || 3001
@@ -33,20 +31,6 @@ const NON_STOCK_TICKERS = new Set([
   "MATIC", "SHIB", "TRX", "BCH", "LINK", "ATOM", "UNI", "ETC", "FIL",
   "USD", "USDT", "USDC", "SPOT",
 ])
-
-// ── Catalyst keyword detection (ported from V2) ───────────────────────────────
-const CATALYST_KEYWORDS = [
-  'contract', 'fda', 'earnings', 'merger', 'acquisition',
-  'data center', 'offering', 'split', 'partnership', 'guidance',
-  'short squeeze', 'ipo', 'listing', 'dividend', 'buyout',
-  'upgrade', 'downgrade', 'price target', 'clinical trial',
-  'sec filing', 'bankruptcy', 'layoffs', 'recall', 'restructuring',
-]
-function detectCatalysts(title) {
-  const lower = (title || '').toLowerCase()
-  return CATALYST_KEYWORDS.filter(kw => lower.includes(kw))
-}
-// ─────────────────────────────────────────────────────────────────────────────
 const US_EXCHANGES = new Set(["NASDAQ", "NYSE", "AMEX"])
 const TRACKED_MARKET_INDICES = [
   { symbol: "DJI", name: "Dow Jones Industrial Average", category: "index" },
@@ -60,25 +44,10 @@ const TRACKED_MARKETS = [
   ...TRACKED_MARKET_INDICES,
 ]
 const MAX_SIGNAL_CHANGE_PCT = Math.max(10, Number(process.env.MAX_SIGNAL_CHANGE_PCT || 300))
-const MIN_LIVE_MODEL_CONFIDENCE = Math.max(0, Math.min(1, Number(process.env.MIN_LIVE_MODEL_CONFIDENCE || 0.05)))
 const PRIVATE_TRACKED_TICKERS = new Set(['SPACEX'])
 
 // ── Middleware ────────────────────────────────────────────
-const ALLOWED_ORIGINS = [
-  'http://localhost:5173',
-  'http://127.0.0.1:5173',
-  process.env.VERCEL_FRONTEND_URL,
-  process.env.FRONTEND_URL,
-].filter(Boolean)
-app.use(cors({
-  origin: (origin, cb) => {
-    if (!origin || ALLOWED_ORIGINS.some(o => origin.startsWith(o)) || origin.includes('.vercel.app')) {
-      return cb(null, true)
-    }
-    cb(null, true) // permissive for dev; tighten in prod by returning cb(new Error('Not allowed'))
-  },
-  credentials: true,
-}))
+app.use(cors({ origin: ['http://localhost:5173', 'http://127.0.0.1:5173'] }))
 app.use(express.json({ limit: '2mb' }))
 
 // ── RAM speed layer: Redis hot cache + Kafka→Redis feed reads ─────────────────
@@ -110,8 +79,7 @@ const redisReady = () => !!redis && redis.status === 'ready'
 // from RAM within the TTL window. Only successful (200) responses are cached.
 const CACHE_RULES = [
   { match: (p) => p === '/api/screener',        ttl: Number(process.env.CACHE_TTL_SCREENER || 20) },
-  { match: (p) => p === '/api/social/rolling',          ttl: Number(process.env.CACHE_TTL_SOCIAL || 15) },
-  { match: (p) => p === '/api/social/rolling/windows', ttl: Number(process.env.CACHE_TTL_SOCIAL || 15) },
+  { match: (p) => p === '/api/social/rolling',  ttl: Number(process.env.CACHE_TTL_SOCIAL || 15) },
   { match: (p) => p.startsWith('/api/charts/'), ttl: Number(process.env.CACHE_TTL_CHARTS || 20) },
   { match: (p) => p === '/api/momentum',        ttl: Number(process.env.CACHE_TTL_MOMENTUM || 15) },
   { match: (p) => p === '/api/correlation',     ttl: Number(process.env.CACHE_TTL_CORRELATION || 30) },
@@ -282,277 +250,7 @@ app.get('/api/ai/overview', async (req, res) => {
   }
 })
 
-app.get('/api/ai/rankings', async (req, res) => {
-  try {
-    const db = mongoose.connection.db
-    if (!db) return res.status(503).json({ ok: false, rows: [], error: 'MongoDB not connected' })
-    const days = Math.min(14, Math.max(1, Number(req.query.days) || 3))
-    const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 50))
-    const socialWindow = Math.min(4320, Math.max(5, Number(req.query.window_minutes) || 1440))
-    const minScore = Math.max(0, Math.min(100, Number(req.query.min_score) || 0))
-    const [arts, tradeRows, model, signalRows] = await Promise.all([
-      aiRecentArticles(db, days),
-      loadEnrichedTradeWatchRows(db, { limit: Math.max(limit, 30), days, socialWindow }),
-      loadLatestPredictionModel(db),
-      db.collection('prediction_signals').find({}, { projection: { ticker: 1, signal_sec: 1, decision: 1, baseline_signal: 1, model_signal: 1, label_status: 1, labels: 1 } }).sort({ signal_sec: -1 }).limit(500).toArray().catch(() => []),
-    ])
-    const newsMap = aiScoreTickers(arts)
-    const latestSignalByTicker = new Map()
-    for (const row of signalRows) {
-      const ticker = String(row.ticker || '').toUpperCase()
-      if (ticker && !latestSignalByTicker.has(ticker)) latestSignalByTicker.set(ticker, row)
-    }
-    const rows = tradeRows.map((row, index) => {
-      const ticker = String(row.ticker || '').toUpperCase()
-      const news = newsMap.get(ticker) || { sum: 0, n: 0, pos: 0, neg: 0 }
-      const newsAvg = news.n ? news.sum / news.n : Number(row.article_sentiment || 0)
-      const newsScore = clamp((newsAvg + 1) / 2)
-      const tradeScore = Number(row.trade_watch?.trade_watch_score || 0)
-      const socialCount = Number(row.message_count || 0)
-      const articleCount = Number(row.article_count || 0)
-      const evidenceScore = Number(row.trade_watch?.evidence_score || 0)
-      const socialDensity = clamp(Math.log1p(socialCount) / Math.log1p(80))
-      const features = predictionFeaturesFromMover(row, socialWindow)
-      const modelSignal = applyPredictionModel(features, model)
-      const baselineSignal = baselinePredictionFromMover(row)
-      const storedSignal = latestSignalByTicker.get(ticker)
-      const storedModelSignal = storedSignal?.model_signal
-      const usableModelSignal = isLiveModelSignalEligible(modelSignal, model) ? modelSignal : null
-      const usableStoredModelSignal = isLiveModelSignalEligible(storedModelSignal, model) ? storedModelSignal : null
-      const activeSignal = usableModelSignal || usableStoredModelSignal || storedSignal?.baseline_signal || baselineSignal
-      const probabilityUp = Number(activeSignal?.probability_up)
-      const modelDirectionBoost = activeSignal?.direction === 'up' ? 0.08 : activeSignal?.direction === 'down' ? -0.08 : 0
-      const predictionScore = Number.isFinite(probabilityUp) ? clamp(probabilityUp) : activeSignal?.direction === 'up' ? 0.62 : activeSignal?.direction === 'down' ? 0.38 : 0.5
-      const quoteFreshness = Number(row.trade_watch?.quote_freshness ?? 0.5)
-      const correlationScore = clamp(Number(features.correlation_score || 0), -1, 1)
-      const validationAccuracy = Number(features.prediction_validation_accuracy_5m)
-      const validationReturn = Number(features.prediction_validation_avg_return_5m)
-      const validationEdge = clamp(
-        (Number.isFinite(validationAccuracy) ? Math.max(0, validationAccuracy - 0.5) * 1.6 : 0) +
-        (Number.isFinite(validationReturn) ? Math.max(0, validationReturn) / 3 : 0),
-        0, 1
-      )
-      const positiveCatalyst = Boolean(
-        (articleCount > 0 && newsAvg > 0.05) || (socialCount > 0 && Number(row.social_sentiment || 0) > 0.08) ||
-        correlationScore > 0.12 || validationEdge > 0.10 || Number(features.is_news_catalyst || 0) === 1
-      )
-      const technicalConfirmation = positiveCatalyst ? clamp(
-        (Number(features.rsi || 50) >= 38 && Number(features.rsi || 50) <= 68 ? 0.35 : 0) +
-        (Number(features.rsi_oversold || 0) * 0.20) +
-        (Number(row.change_pct || 0) >= -4 && Number(row.change_pct || 0) <= 12 ? 0.20 : 0) +
-        (Number(row.rel_volume || 0) >= 1.25 ? 0.25 : 0), 0, 1
-      ) : 0
-      const blended = clamp(
-        tradeScore * 0.22 + newsScore * 0.18 + evidenceScore * 0.14 + socialDensity * 0.08 +
-        predictionScore * 0.16 + quoteFreshness * 0.05 + ((correlationScore + 1) / 2) * 0.08 +
-        validationEdge * 0.05 + technicalConfirmation * 0.04 + modelDirectionBoost
-      )
-      const aiRankScore = Number((blended * 100).toFixed(1))
-      const direction = aiRankScore >= 68 && Number(row.change_pct || 0) >= 0 ? 'bullish' : aiRankScore <= 38 || activeSignal?.direction === 'down' ? 'bearish' : 'watch'
-      return {
-        rank_seed: index + 1, ticker, company: row.company || '', price: row.price ?? null,
-        change_pct: Number(row.change_pct || 0), rel_volume: Number(row.rel_volume || 0), volume: Number(row.volume || 0),
-        ai_rank_score: aiRankScore, direction, confidence: Number(Math.abs(blended - 0.5).toFixed(3)),
-        trade_watch_score: Number(tradeScore.toFixed(3)),
-        prediction_signal: {
-          direction: activeSignal?.direction || (predictionScore >= 0.55 ? 'up' : predictionScore <= 0.45 ? 'down' : 'watch'),
-          probability_up: Number.isFinite(Number(activeSignal?.probability_up)) && Number(activeSignal?.probability_up) > 0
-            ? Number(activeSignal.probability_up)
-            : Number(predictionScore.toFixed(3)),
-          confidence: activeSignal?.confidence ?? Number(Math.abs(predictionScore - 0.5).toFixed(3)),
-          predicted_return_5m: activeSignal?.predicted_return_5m ?? null,
-          model: activeSignal?.model || 'baseline_trade_watch_v1',
-        },
-        model_ready: Boolean(modelSignal),
-        evidence: {
-          news_score: Number((newsAvg * 100).toFixed(1)), news_articles: articleCount,
-          scored_news_articles: Number(news.n || 0), bullish_news: Number(news.pos || 0), bearish_news: Number(news.neg || 0),
-          social_posts: socialCount, social_sentiment: Number(Number(row.social_sentiment || 0).toFixed(3)),
-          evidence_score: Number(evidenceScore.toFixed(3)), agreement: Number(row.trade_watch?.agreement || 0),
-          quote_age_minutes: row.trade_watch?.quote_age_minutes ?? null, latest_signal_status: storedSignal?.label_status || null,
-        },
-        reasons: row.trade_watch?.reasons || [], risks: row.trade_watch?.risks || [],
-      }
-    })
-      .filter(row => row.ticker && row.ai_rank_score >= minScore)
-      .sort((a, b) => b.ai_rank_score - a.ai_rank_score || b.evidence.news_articles - a.evidence.news_articles)
-      .slice(0, limit)
-      .map((row, index) => ({ ...row, rank: index + 1 }))
-    const modelValidation = modelValidationState(model)
-    res.json({
-      ok: true, generated_at: new Date().toISOString(),
-      model: {
-        name: model?.model_id || PREDICTION_MODEL_ID, status: model?.status || 'baseline',
-        samples: Number(model?.samples || 0), min_samples: model?.min_samples || Number(process.env.PREDICTION_MIN_TRAINING_SAMPLES || 20),
-        metrics: model?.metrics || null, validation_status: modelValidation.status, validation_edge: modelValidation.edge,
-        live_classifier_enabled: modelValidation.allow_live_classifier, live_classifier_reason: modelValidation.reason,
-        fallback: 'baseline_trade_watch_v1',
-      },
-      methodology: {
-        ranking: 'blended Trade Watch, rolling news sentiment, social density, quote freshness, correlation, gated technical confirmation, and validated prediction signal',
-        scaling: 'server-side capped and cached; no browser-side scan of Mongo collections',
-        provider_dependency: 'none on read path; uses stored validated model when it beats baseline, otherwise shadows it and falls back to baseline/transparent evidence',
-      },
-      summary: {
-        rows: rows.length, article_window_days: days, scored_articles: arts.length,
-        social_window_minutes: socialWindow, bullish: rows.filter(r => r.direction === 'bullish').length,
-        bearish: rows.filter(r => r.direction === 'bearish').length, watch: rows.filter(r => r.direction === 'watch').length,
-        model_status: model?.status || 'baseline', model_samples: Number(model?.samples || 0),
-      },
-      rows,
-    })
-  } catch (err) {
-    console.error('GET /api/ai/rankings failed:', err)
-    res.status(500).json({ ok: false, rows: [], error: String(err.message || err) })
-  }
-})
-
-app.get('/api/ai/ticker/:ticker', async (req, res) => {
-  try {
-    const db = mongoose.connection.db
-    if (!db) return res.status(503).json({ ok: false, error: 'MongoDB not connected' })
-    const ticker = String(req.params.ticker || '').toUpperCase().replace(/[^A-Z0-9.-]/g, '')
-    if (!ticker) return res.status(400).json({ ok: false, error: 'Ticker is required' })
-    const days = Math.min(14, Math.max(1, Number(req.query.days) || 3))
-    const socialWindow = Math.min(4320, Math.max(5, Number(req.query.window_minutes) || 1440))
-    const sinceSocialSec = Math.floor(Date.now() / 1000) - socialWindow * 60
-    const tickerRegex = `(^|,\\s*)${escapeRegExp(ticker)}(\\s*,|$)`
-    const articleMatch = {
-      ...recentArticleMatch(days),
-      ...approvedNewsSourceMongoFilter('source'),
-      $or: [
-        { ticker: { $regex: tickerRegex, $options: 'i' } },
-        { tickers: ticker },
-        { tickers_mentioned: ticker },
-      ],
-    }
-    const [movers, arts, model, articles, articleCount, socialRows, predictionRows] = await Promise.all([
-      loadPositiveFinvizMoverRows(db, 200),
-      aiRecentArticles(db, days),
-      loadLatestPredictionModel(db),
-      db.collection('articles').find(articleMatch, {
-        projection: { title: 1, source: 1, sentiment: 1, sentiment_score: 1, event_type: 1, sentiment_reason: 1, publish_date: 1, fetched_date: 1, detected_at: 1, url: 1 },
-      }).sort({ publish_date: -1, fetched_date: -1, detected_at: -1 }).limit(20).toArray(),
-      db.collection('articles').countDocuments(articleMatch),
-      db.collection('socials').aggregate([
-        ...socialTimeStages(),
-        { $match: { _event_sec: { $gte: sinceSocialSec }, _ticker_candidates: ticker } },
-        { $sort: { _event_sec: -1 } }, { $limit: 20 },
-        { $project: { _id: 0, platform: '$_norm_platform', author: 1, text: { $ifNull: ['$text', { $ifNull: ['$content', '$title'] }] }, sentiment: 1, sentiment_score: 1, url: 1, event_sec: '$_event_sec' } },
-      ]).toArray(),
-      db.collection('prediction_signals').find({ ticker }, {
-        projection: { _id: 0, signal_id: 1, signal_sec: 1, decision: 1, baseline_signal: 1, model_signal: 1, label_status: 1, labels: 1, rank: 1 },
-      }).sort({ signal_sec: -1 }).limit(20).toArray(),
-    ])
-    const mover = movers.find(row => String(row.ticker || '').toUpperCase() === ticker)
-    const [articleMap, socialMap] = await Promise.all([
-      loadArticleStatsForTickers(db, [ticker], days),
-      loadSocialStatsForTickers(db, [ticker], socialWindow),
-    ])
-    const enriched = mover ? addTradeWatchFields(mergeMoverContext(mover, articleMap.get(ticker), socialMap.get(ticker))) : null
-    const news = aiScoreTickers(arts).get(ticker) || { sum: 0, n: 0, pos: 0, neg: 0 }
-    const newsAvg = news.n ? news.sum / news.n : Number(enriched?.article_sentiment || 0)
-    const features = enriched ? predictionFeaturesFromMover(enriched, socialWindow) : {}
-    const modelSignal = enriched ? applyPredictionModel(features, model) : null
-    const baselineSignal = enriched ? baselinePredictionFromMover(enriched) : null
-    const storedModelSignal = predictionRows[0]?.model_signal
-    const usableModelSignal = isLiveModelSignalEligible(modelSignal, model) ? modelSignal : null
-    const usableStoredModelSignal = isLiveModelSignalEligible(storedModelSignal, model) ? storedModelSignal : null
-    const activeSignal = usableModelSignal || usableStoredModelSignal || predictionRows[0]?.baseline_signal || baselineSignal
-    const socialCount = Number(enriched?.message_count || 0)
-    const articleTotal = Number(enriched?.article_count || 0)
-    const evidenceScore = Number(enriched?.trade_watch?.evidence_score || 0)
-    const tradeScore = Number(enriched?.trade_watch?.trade_watch_score || 0)
-    const predictionScore = Number.isFinite(Number(activeSignal?.probability_up)) ? clamp(Number(activeSignal.probability_up)) : activeSignal?.direction === 'up' ? 0.62 : activeSignal?.direction === 'down' ? 0.38 : 0.5
-    const newsScore = clamp((newsAvg + 1) / 2)
-    const socialDensity = clamp(Math.log1p(socialCount) / Math.log1p(80))
-    const quoteFreshness = Number(enriched?.trade_watch?.quote_freshness ?? 0.5)
-    const correlationScore = clamp(Number(features.correlation_score || 0), -1, 1)
-    const validationAccuracy = Number(features.prediction_validation_accuracy_5m)
-    const validationReturn = Number(features.prediction_validation_avg_return_5m)
-    const validationEdge = clamp(
-      (Number.isFinite(validationAccuracy) ? Math.max(0, validationAccuracy - 0.5) * 1.6 : 0) +
-      (Number.isFinite(validationReturn) ? Math.max(0, validationReturn) / 3 : 0), 0, 1
-    )
-    const positiveCatalyst = Boolean(
-      (articleTotal > 0 && newsAvg > 0.05) || (socialCount > 0 && Number(enriched?.social_sentiment || 0) > 0.08) ||
-      correlationScore > 0.12 || validationEdge > 0.10 || Number(features.is_news_catalyst || 0) === 1
-    )
-    const technicalConfirmation = positiveCatalyst ? clamp(
-      (Number(features.rsi || 50) >= 38 && Number(features.rsi || 50) <= 68 ? 0.35 : 0) +
-      (Number(features.rsi_oversold || 0) * 0.20) +
-      (Number(enriched?.change_pct || 0) >= -4 && Number(enriched?.change_pct || 0) <= 12 ? 0.20 : 0) +
-      (Number(enriched?.rel_volume || 0) >= 1.25 ? 0.25 : 0), 0, 1
-    ) : 0
-    const blended = enriched ? clamp(
-      tradeScore * 0.22 + newsScore * 0.18 + evidenceScore * 0.14 + socialDensity * 0.08 +
-      predictionScore * 0.16 + quoteFreshness * 0.05 + ((correlationScore + 1) / 2) * 0.08 +
-      validationEdge * 0.05 + technicalConfirmation * 0.04 +
-      (activeSignal?.direction === 'up' ? 0.08 : activeSignal?.direction === 'down' ? -0.08 : 0)
-    ) : 0
-    const aiRankScore = Number((blended * 100).toFixed(1))
-    const labeledSignals = predictionRows.filter(r => r.label_status && r.label_status !== 'pending')
-    const completeSignals = predictionRows.filter(r => r.label_status === 'complete')
-    const correct5 = predictionRows.map(r => r.labels?.return_5m?.direction_correct).filter(v => v === true || v === false)
-    const accuracy5m = correct5.length ? Number((correct5.filter(Boolean).length / correct5.length).toFixed(3)) : null
-    const modelValidation = modelValidationState(model)
-    const checks = [
-      { label: 'Ticker in Finviz mover universe', status: mover ? 'pass' : 'warn', detail: mover ? 'Ticker is present in the latest Finviz positive mover set.' : 'Ticker is not in the current Finviz positive mover set.' },
-      { label: 'News evidence window', status: articleCount > 0 ? 'pass' : 'warn', detail: `${articleCount} approved articles found in the last ${days} day(s).` },
-      { label: 'Social evidence window', status: socialCount > 0 ? 'pass' : 'warn', detail: `${socialCount} social posts found in the selected ${socialWindow} minute window.` },
-      { label: 'Prediction validation', status: correct5.length >= 20 ? 'pass' : correct5.length ? 'warn' : 'info', detail: correct5.length ? `${correct5.length} labeled 5m outcomes; accuracy ${Math.round((accuracy5m || 0) * 100)}%.` : 'No completed 5m labels yet; ranking uses current model/baseline signal.' },
-      { label: 'Model validation set', status: modelValidation.allow_live_classifier ? 'pass' : Number(model?.metrics?.baseline_actionable_samples || 0) > 0 ? 'warn' : 'info', detail: `Live classifier: ${modelValidation.allow_live_classifier ? 'enabled' : `shadowed (${modelValidation.reason})`}.` },
-    ]
-    res.json({
-      ok: true, ticker, days, social_window_minutes: socialWindow,
-      score: {
-        ai_rank_score: aiRankScore,
-        direction: aiRankScore >= 68 && Number(enriched?.change_pct || 0) >= 0 ? 'bullish' : aiRankScore <= 38 ? 'bearish' : 'watch',
-        trade_watch_score: Number(tradeScore.toFixed(3)), news_score: Number((newsAvg * 100).toFixed(1)),
-        evidence_score: Number(evidenceScore.toFixed(3)), social_density_score: Number(socialDensity.toFixed(3)),
-        prediction_score: Number(predictionScore.toFixed(3)), quote_freshness: Number(quoteFreshness.toFixed(3)),
-      },
-      mover: enriched ? {
-        ticker, company: enriched.company || '', price: enriched.price ?? null,
-        change_pct: Number(enriched.change_pct || 0), rel_volume: Number(enriched.rel_volume || 0),
-        quote_age_minutes: enriched.trade_watch?.quote_age_minutes ?? null,
-        reasons: enriched.trade_watch?.reasons || [], risks: enriched.trade_watch?.risks || [],
-      } : null,
-      evidence: {
-        article_count: articleTotal, approved_article_count: articleCount, scored_news_articles: Number(news.n || 0),
-        bullish_news: Number(news.pos || 0), bearish_news: Number(news.neg || 0),
-        social_posts: socialCount, social_sentiment: Number(Number(enriched?.social_sentiment || 0).toFixed(3)),
-      },
-      prediction: {
-        active_signal: activeSignal || null, model_signal: modelSignal, baseline_signal: baselineSignal,
-        model: model ? { status: model.status, samples: Number(model.samples || 0), metrics: model.metrics || null, updated_at: model.updated_at || null } : null,
-        signals: predictionRows.map(r => ({
-          signal_id: r.signal_id, signal_sec: r.signal_sec, time: timeLabel(r.signal_sec),
-          decision: r.decision, rank: r.rank, label_status: r.label_status || 'pending',
-          model_signal: r.model_signal || null, baseline_signal: r.baseline_signal || null, labels: r.labels || {},
-        })),
-        summary: { total: predictionRows.length, labeled: labeledSignals.length, complete: completeSignals.length, accuracy_5m: accuracy5m },
-      },
-      articles: articles.map(a => ({
-        title: a.title || '', source: a.source || '', sentiment: a.sentiment || 'neutral',
-        sentiment_score: Number(articleSentimentValue(a).toFixed(3)), event_type: a.event_type || 'general_news',
-        reason: a.sentiment_reason || '', url: a.url || '',
-        time: timeLabel(a.publish_date || a.fetched_date || a.detected_at),
-      })),
-      social_posts: socialRows.map(p => ({
-        platform: p.platform || 'social', author: p.author || '', text: p.text || '',
-        sentiment: typeof p.sentiment_score === 'number' ? Number(p.sentiment_score.toFixed(3)) : sentimentDirectionValue(p.sentiment),
-        url: p.url || '', time: timeLabel(p.event_sec),
-      })),
-      checks,
-    })
-  } catch (err) {
-    console.error('GET /api/ai/ticker/:ticker failed:', err)
-    res.status(500).json({ ok: false, error: String(err.message || err) })
-  }
-})
-
-const SUPPORTED_TRANSLATION_LANGUAGES = new Set(["en", "es", "fr", "de", "pt", "ja", "zh", "hi", "ar", "bn", "ru", "ko"])
+const SUPPORTED_TRANSLATION_LANGUAGES = new Set(["en", "es", "fr", "de", "pt", "ja"])
 const UNSUPPORTED_TRANSLATION_SCRIPT_RE = /[\u3400-\u9FFF\uF900-\uFAFF\u3040-\u30FF\uAC00-\uD7AF]/
 
 const FINANCE_GLOSSARY = {
@@ -874,47 +572,7 @@ function englishFallbackTranslate(text) {
   return translated === original ? `English translation pending: ${original}` : translated
 }
 
-async function translateWithGoogle(text, targetLanguage) {
-  const apiKey = process.env.GOOGLE_TRANSLATE_API_KEY
-  if (!apiKey) return null
-  const url = `https://translation.googleapis.com/language/translate/v2?key=${apiKey}`
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ q: text, target: targetLanguage, format: 'text' }),
-  })
-  if (!response.ok) throw new Error(`Google Translate API ${response.status}`)
-  const data = await response.json()
-  return data?.data?.translations?.[0]?.translatedText || null
-}
-
-async function translateWithMyMemory(text, targetLanguage) {
-  if (targetLanguage === 'en') return null
-  const langMap = { zh: 'zh-CN', bn: 'bn-BD', hi: 'hi-IN' }
-  const lang = langMap[targetLanguage] || targetLanguage
-  const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=en|${lang}`
-  const res = await fetch(url, { signal: AbortSignal.timeout(5000) })
-  if (!res.ok) return null
-  const data = await res.json()
-  const translated = data?.responseData?.translatedText
-  if (!translated || translated === text) return null
-  // MyMemory returns error messages as translated text when quota exceeded
-  if (translated.toLowerCase().includes('mymemory') || translated.toLowerCase().includes('quota')) return null
-  return translated
-}
-
 async function translateWithProvider(text, targetLanguage) {
-  // Try Google Translate first if key is set
-  const googleResult = await translateWithGoogle(text, targetLanguage)
-  if (googleResult) return googleResult
-
-  // Try MyMemory free API (500 chars/day free, no key needed)
-  try {
-    const myMemoryResult = await translateWithMyMemory(text, targetLanguage)
-    if (myMemoryResult) return myMemoryResult
-  } catch { /* ignore, fall through to glossary */ }
-
-  // Fall back to custom translation provider URL
   const url = process.env.TRANSLATION_API_URL
   if (!url || typeof fetch !== "function") return null
 
@@ -1057,12 +715,6 @@ function recentArticleMatch(days = 0) {
     : latestMarketCloseCutoff().getTime()
 
   return articleWindowMatch(cutoffMs)
-}
-
-function approvedNewsSourceMongoFilter(field = 'source') {
-  const blocked = process.env.BLOCKED_SOURCES ? process.env.BLOCKED_SOURCES.split(',').map(s => s.trim()).filter(Boolean) : []
-  if (!blocked.length) return {}
-  return { [field]: { $nin: blocked } }
 }
 
 function articleMatchStage(match) {
@@ -1423,8 +1075,6 @@ function normalizeScreenerDoc(doc = {}) {
     quote_time: doc.quote_time || null,
     quote_updated_at: doc.quote_updated_at || null,
     quote_status: doc.quote_status || (hasStoredPrice ? "priced" : "missing"),
-    high_52w: nullableNumber(doc.high_52w ?? doc['52W High'] ?? doc['52w_high'] ?? doc.week52High ?? doc.fiftyTwoWeekHigh),
-    low_52w:  nullableNumber(doc.low_52w  ?? doc['52W Low']  ?? doc['52w_low']  ?? doc.week52Low  ?? doc.fiftyTwoWeekLow),
   }
 }
 
@@ -2056,45 +1706,6 @@ async function loadLatestPredictionModel(db) {
   return db.collection("prediction_models").findOne({ _id: PREDICTION_MODEL_ID })
 }
 
-function modelValidationState(model = null) {
-  if (model?.status !== "trained") {
-    return { status: model?.status || "missing", allow_live_classifier: false, edge: null, reason: "model_not_trained" }
-  }
-  if (!model.metrics) {
-    return { status: "training_evaluation", allow_live_classifier: true, edge: null, reason: "temporary_model_without_persisted_metrics" }
-  }
-  const metrics = model?.metrics || {}
-  const actionable = Number(metrics.actionable_samples || 0)
-  const accuracy = Number(metrics.directional_accuracy_5m)
-  const baselineAccuracy = Number(metrics.baseline_directional_accuracy_5m)
-  const minSamples = Number(process.env.MIN_LIVE_MODEL_VALIDATION_SAMPLES || 50)
-  const minEdge = Number(process.env.MIN_LIVE_MODEL_EDGE || 0)
-  const minAccuracy = Number(process.env.MIN_LIVE_MODEL_ACCURACY || 0.60)
-  const edge = Number.isFinite(accuracy) && Number.isFinite(baselineAccuracy) ? Number((accuracy - baselineAccuracy).toFixed(3)) : null
-  if (model?.direction_classifier?.type === "knn_centroid_direction_v1" && process.env.ALLOW_KNN_LIVE_MODEL !== "1") {
-    return { status: "shadow_knn_disabled", allow_live_classifier: false, edge, reason: "knn_live_use_disabled" }
-  }
-  if (actionable < minSamples) {
-    return { status: "shadow_insufficient_validation", allow_live_classifier: false, edge, reason: `needs_at_least_${minSamples}_actionable_holdout_samples` }
-  }
-  if (!Number.isFinite(accuracy)) {
-    return { status: "shadow_no_validation_accuracy", allow_live_classifier: false, edge, reason: "missing_validation_accuracy" }
-  }
-  if (accuracy < minAccuracy) {
-    return { status: "shadow_below_required_accuracy", allow_live_classifier: false, edge, reason: `model_accuracy_${accuracy.toFixed(3)}_below_required_${minAccuracy.toFixed(3)}` }
-  }
-  if (Number.isFinite(baselineAccuracy) && accuracy < baselineAccuracy + minEdge) {
-    return { status: "shadow_under_baseline", allow_live_classifier: false, edge, reason: `model_accuracy_${accuracy.toFixed(3)}_below_required_baseline_${(baselineAccuracy + minEdge).toFixed(3)}` }
-  }
-  return { status: "live_validated_edge", allow_live_classifier: true, edge, reason: "model_beats_recent_baseline" }
-}
-
-function isLiveModelSignalEligible(signal = null, model = null) {
-  if (!signal || model?.status !== "trained") return false
-  if (Number(signal.confidence || 0) < MIN_LIVE_MODEL_CONFIDENCE) return false
-  return modelValidationState(model).allow_live_classifier
-}
-
 async function loadEnrichedTradeWatchRows(db, { limit = 10, days = 2, socialWindow = 60 } = {}) {
   const requestedLimit = Math.max(1, Math.min(50, Number(limit || 10)))
   const movers = await loadPositiveFinvizMoverRows(db, Math.max(requestedLimit * 6, 100))
@@ -2337,8 +1948,10 @@ app.post("/api/translate", async (req, res) => {
     const targetLanguage = String(req.body.target_language || req.body.target || "en").toLowerCase()
 
     if (!text) return res.status(400).json({ ok: false, error: "text is required" })
+    if (!SUPPORTED_TRANSLATION_LANGUAGES.has(targetLanguage)) {
+      return res.status(400).json({ ok: false, error: "unsupported target language" })
+    }
 
-    // Try Google Translate / external provider first
     try {
       const providerTranslation = await translateWithProvider(text, targetLanguage)
       if (providerTranslation) {
@@ -2346,94 +1959,26 @@ app.post("/api/translate", async (req, res) => {
           ok: true,
           translated_text: providerTranslation,
           target_language: targetLanguage,
-          provider: process.env.GOOGLE_TRANSLATE_API_KEY ? "google" : "external",
+          provider: "external",
         })
       }
     } catch (err) {
       console.warn("Translation provider failed, using glossary fallback:", err.message)
     }
 
-    // Glossary-only fallback for supported languages; for others return original
-    const hasGlossary = SUPPORTED_TRANSLATION_LANGUAGES.has(targetLanguage)
     return res.json({
       ok: true,
-      translated_text: hasGlossary ? glossaryTranslate(text, targetLanguage) : text,
+      translated_text: glossaryTranslate(text, targetLanguage),
       target_language: targetLanguage,
-      provider: hasGlossary
-        ? (UNSUPPORTED_TRANSLATION_SCRIPT_RE.test(text) ? "glossary_cjk_fallback" : "glossary")
-        : "passthrough",
+      provider: UNSUPPORTED_TRANSLATION_SCRIPT_RE.test(text) ? "glossary_cjk_fallback" : "glossary",
     })
   } catch (err) {
     res.status(500).json({ ok: false, error: String(err.message || err) })
   }
 })
 
-// Language preference endpoints
-app.get('/api/settings/language', async (req, res) => {
-  try {
-    const db = mongoose.connection.db
-    if (!db) return res.json({ ok: true, language: 'en' })
-    const row = await db.collection('app_settings').findOne({ key: 'ui_language' })
-    res.json({ ok: true, language: row?.value || 'en' })
-  } catch (err) {
-    res.json({ ok: true, language: 'en' })
-  }
-})
-
-app.post('/api/settings/language', async (req, res) => {
-  try {
-    const lang = String(req.body.language || 'en').toLowerCase().slice(0, 5)
-    const db = mongoose.connection.db
-    if (db) {
-      await db.collection('app_settings').updateOne(
-        { key: 'ui_language' },
-        { $set: { key: 'ui_language', value: lang, updated_at: new Date() } },
-        { upsert: true }
-      )
-    }
-    res.json({ ok: true, language: lang })
-  } catch (err) {
-    res.status(500).json({ ok: false, error: String(err.message || err) })
-  }
-})
-
-// Translation status endpoint
-app.get('/api/translate/status', (req, res) => {
-  res.json({
-    ok: true,
-    google_translate_configured: !!process.env.GOOGLE_TRANSLATE_API_KEY,
-    supported_languages: Array.from(SUPPORTED_TRANSLATION_LANGUAGES),
-  })
-})
-
 app.use('/api/articles',    articlesRouter)
 app.use('/api/screener',    screenerRouter)
-
-// Google News RSS fallback – returns up to 3 articles when local DB has none
-app.get('/api/articles/web-fallback', async (req, res) => {
-  const ticker = String(req.query.ticker || '').toUpperCase().trim()
-  if (!ticker) return res.status(400).json({ ok: false, error: 'ticker required' })
-  try {
-    const query = encodeURIComponent(`${ticker} stock`)
-    const rssUrl = `https://news.google.com/rss/search?q=${query}&hl=en-US&gl=US&ceid=US:en`
-    const xml = await fetch(rssUrl, { headers: { 'User-Agent': 'Mozilla/5.0 FlashFeed/1.0' } }).then(r => r.text())
-    const items = []
-    const itemRe = /<item>([\s\S]*?)<\/item>/g
-    let m
-    while ((m = itemRe.exec(xml)) !== null && items.length < 3) {
-      const block = m[1]
-      const title = (block.match(/<title><!\[CDATA\[(.*?)\]\]><\/title>/) || block.match(/<title>(.*?)<\/title>/))?.[1] || ''
-      const link  = (block.match(/<link>(.*?)<\/link>/) || block.match(/<guid[^>]*>(.*?)<\/guid>/))?.[1] || ''
-      const pubDate = block.match(/<pubDate>(.*?)<\/pubDate>/)?.[1] || ''
-      const source = block.match(/<source[^>]*>(.*?)<\/source>/)?.[1] || 'Google News'
-      if (title) items.push({ title: title.trim(), url: link.trim(), publishedAt: pubDate, source: source.trim(), fromWeb: true })
-    }
-    res.json({ ok: true, ticker, articles: items })
-  } catch (err) {
-    console.error('web-fallback failed:', err.message)
-    res.status(500).json({ ok: false, error: String(err.message) })
-  }
-})
 
 app.get("/api/momentum/trending", async (req, res) => {
   try {
@@ -2607,7 +2152,7 @@ app.get("/api/momentum/:ticker/details", async (req, res) => {
       source: article.source || "News",
       sentiment: article.sentiment || "neutral",
       time: timeLabel(article.publish_date || article.fetched_date),
-      catalyst: detectCatalysts(article.title).join(', ') || article.category || undefined,
+      catalyst: article.category || undefined,
       url: article.url,
     }))
 
@@ -2656,22 +2201,7 @@ app.get("/api/prices/:ticker", async (req, res) => {
     if (!db) return res.status(503).json({ ok: false, error: "MongoDB is not connected" })
 
     const ticker = String(req.params.ticker || "").toUpperCase().replace(/[^A-Z0-9.-]/g, "")
-    let doc = await db.collection("screeners").findOne({ ticker })
-    // Unknown or stale ticker → pull a live CNBC quote on demand and store it
-    const quoteAgeSec = Math.floor(Date.now() / 1000) - Number(doc?.quote_updated_at || 0)
-    if (ticker && (!doc || !Number.isFinite(Number(doc.price)) || quoteAgeSec > 1800)) {
-      try {
-        const [live] = await fetchCnbcQuoteRows([ticker])
-        if (live) {
-          await db.collection("screeners").updateOne(
-            { ticker },
-            { $set: Object.fromEntries(Object.entries(live).filter(([, v]) => v !== null)) },
-            { upsert: true }
-          )
-          doc = { ...(doc || {}), ...live }
-        }
-      } catch { /* keep whatever is stored */ }
-    }
+    const doc = await db.collection("screeners").findOne({ ticker })
     const row = normalizeScreenerDoc(doc || { ticker })
     res.json({
       ok: true,
@@ -3207,765 +2737,46 @@ function yahooIntervalFor(interval) {
   return "1d"
 }
 
-// Yahoo Finance crumb/cookie cache (valid ~24h)
-let _yahooCrumb = null
-let _yahooCookieStr = null
-let _yahooAuthAt = 0
-const YAHOO_AUTH_TTL_MS = 20 * 60 * 60 * 1000 // 20 hours
-
-let _yahooAuthFailedAt = 0
-async function getYahooCrumb() {
-  if (_yahooCrumb && (Date.now() - _yahooAuthAt) < YAHOO_AUTH_TTL_MS) {
-    return { crumb: _yahooCrumb, cookie: _yahooCookieStr }
-  }
-  // Yahoo is unreachable from some hosts (Railway): don't pay the connect
-  // timeout on every request — fail fast for 5 min so callers hit fallbacks.
-  if (Date.now() - _yahooAuthFailedAt < 5 * 60 * 1000) {
-    throw new Error('Yahoo auth recently failed; using fallback source')
-  }
-  try {
-    const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-
-    // Step 1: hit Yahoo Finance to get session cookies
-    const r1 = await fetch('https://finance.yahoo.com/', {
-      headers: { 'User-Agent': UA, 'Accept-Language': 'en-US,en;q=0.9' },
-      redirect: 'follow',
-      signal: AbortSignal.timeout(8000),
-    })
-    const rawCookies = r1.headers.getSetCookie?.() ?? (r1.headers.get('set-cookie') ? [r1.headers.get('set-cookie')] : [])
-    const cookieStr = rawCookies.map(c => c.split(';')[0]).join('; ')
-
-    // Step 2: get crumb
-    const r2 = await fetch('https://query1.finance.yahoo.com/v1/test/getcrumb', {
-      headers: { 'User-Agent': UA, 'Cookie': cookieStr, 'Accept': '*/*' },
-      signal: AbortSignal.timeout(8000),
-    })
-    const crumb = (await r2.text()).trim()
-    if (!crumb || crumb.length < 3) throw new Error('Yahoo crumb fetch failed')
-
-    _yahooCrumb = crumb
-    _yahooCookieStr = cookieStr
-    _yahooAuthAt = Date.now()
-    return { crumb, cookie: cookieStr }
-  } catch (err) {
-    _yahooAuthFailedAt = Date.now()
-    throw err
-  }
-}
-
-// Fetch up to 30 recent StockTwits messages for a ticker and upsert into socials.
-// Uses the public unauthenticated endpoint — no key required, ~200 req/hr limit.
-async function fetchStockTwitsForTicker(db, ticker) {
-  try {
-    const url = `https://api.stocktwits.com/api/2/streams/symbol/${encodeURIComponent(ticker)}.json?limit=30`
-    const ctrl = new AbortController()
-    const tmo = setTimeout(() => ctrl.abort(), 12000)
-    const resp = await fetch(url, {
-      headers: { 'User-Agent': 'Mozilla/5.0 FlashFeed/1.0' },
-      signal: ctrl.signal,
-    })
-    clearTimeout(tmo)
-    if (!resp.ok) return 0
-    const json = await resp.json()
-    const messages = Array.isArray(json.messages) ? json.messages : []
-    if (!messages.length) return 0
-
-    let inserted = 0
-    for (const msg of messages) {
-      const stId = String(msg.id || '')
-      if (!stId) continue
-      const sentimentRaw = msg.entities?.sentiment?.basic || ''
-      const sentimentScore = /bullish/i.test(sentimentRaw) ? 1 : /bearish/i.test(sentimentRaw) ? -1 : 0
-      const createdSec = msg.created_at
-        ? Math.floor(new Date(msg.created_at).getTime() / 1000)
-        : Math.floor(Date.now() / 1000)
-
-      const doc = {
-        platform: 'stocktwits',
-        collector: 'node_stocktwits',
-        ticker,
-        symbol: ticker,
-        text: String(msg.body || ''),
-        author: msg.user?.username || '',
-        sentiment: sentimentRaw || 'Neutral',
-        sentiment_score: sentimentScore,
-        finance_keywords: socialKeywordsFor(msg.body),
-        url: `https://stocktwits.com/symbol/${ticker}`,
-        fetched_at: Math.floor(Date.now() / 1000),
-        detected_at: createdSec,
-        timestamp: createdSec,
-        created_at: new Date((createdSec) * 1000),
-        source: 'stocktwits',
-        _st_id: stId,
-      }
-      const result = await db.collection('socials').updateOne(
-        { _st_id: stId },
-        { $setOnInsert: doc },
-        { upsert: true }
-      )
-      if (result.upsertedCount) inserted++
-    }
-    return inserted
-  } catch (err) {
-    console.warn('[stocktwits] fetch failed for', ticker, err.message)
-    return 0
-  }
-}
-
-const REDDIT_RSS_HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36 FlashFeed/1.0',
-  'Accept': 'application/xml,application/atom+xml,text/html,application/xhtml+xml,*/*;q=0.8',
-  'Accept-Language': 'en-US,en;q=0.9',
-}
-
-function parseRedditAtomXml(xml) {
-  const entries = []
-  const entryRe = /<entry>([\s\S]*?)<\/entry>/g
-  const decode = s => s.replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/&#x27;/g,"'").replace(/&#39;/g,"'")
-  let m
-  while ((m = entryRe.exec(xml)) !== null) {
-    const e = m[1]
-    const title  = decode((/<title[^>]*>([\s\S]*?)<\/title>/.exec(e) || [])[1] || '').trim()
-    const link   = (/<link[^>]*href="([^"]*)"/.exec(e) || [])[1] || ''
-    const author = decode((/<name>([\s\S]*?)<\/name>/.exec(e) || [])[1] || '').replace('/u/', '')
-    const updated = (/<updated>([\s\S]*?)<\/updated>/.exec(e) || [])[1] || ''
-    const sub = (/<category[^>]*term="([^"]*)"/.exec(e) || [])[1] || ''
-    if (!title || !link || link.indexOf('/comments/') === -1) continue
-    const idMatch = /\/comments\/([a-z0-9]+)\//.exec(link)
-    entries.push({
-      id: idMatch ? idMatch[1] : link,
-      title,
-      link,
-      author,
-      subreddit: sub,
-      created_utc: updated ? Math.floor(new Date(updated).getTime() / 1000) : Math.floor(Date.now() / 1000),
-    })
-  }
-  return entries
-}
-
-async function fetchRedditRss(ticker, limit = 25) {
-  const query = encodeURIComponent(`$${ticker}`)
-  const subs  = 'wallstreetbets+investing+stocks+StockMarket+options'
-  const url = `https://www.reddit.com/r/${subs}/search.rss?q=${query}&restrict_sr=on&sort=new&t=week&limit=${limit}`
-  const ctrl = new AbortController()
-  const tmo = setTimeout(() => ctrl.abort(), 12000)
-  try {
-    const resp = await fetch(url, {
-      headers: REDDIT_RSS_HEADERS,
-      signal: ctrl.signal,
-    })
-    clearTimeout(tmo)
-    if (!resp.ok) { console.warn(`[reddit] RSS ${resp.status} for ${ticker}`); return [] }
-    const xml = await resp.text()
-    const isHtml = xml.trimStart().startsWith('<!')
-    if (isHtml) { console.warn(`[reddit] RSS returned HTML for ${ticker} — IP may be blocked`); return [] }
-    const entries = parseRedditAtomXml(xml)
-    console.log(`[reddit] RSS ${ticker}: ${entries.length} entries`)
-    return entries
-  } catch (e) {
-    clearTimeout(tmo)
-    console.warn(`[reddit] RSS fetch error for ${ticker}:`, e.message)
-    return []
-  }
-}
-
-async function fetchRedditForTicker(db, ticker) {
-  try {
-    const entries = await fetchRedditRss(ticker, 25)
-    if (!entries.length) return 0
-
-    let inserted = 0
-    for (const e of entries) {
-      const redditId = String(e.id || '')
-      if (!redditId) continue
-
-      const naive = naiveSocialSentiment(e.title)
-      const doc = {
-        platform: 'reddit',
-        collector: 'node_reddit_rss',
-        ticker,
-        symbol: ticker,
-        text: e.title,
-        author: e.author || '',
-        sentiment: naive.sentiment,
-        sentiment_score: naive.score,
-        finance_keywords: socialKeywordsFor(e.title),
-        url: e.link,
-        subreddit: e.subreddit || '',
-        fetched_at: Math.floor(Date.now() / 1000),
-        detected_at: e.created_utc,
-        timestamp: e.created_utc,
-        created_at: new Date(e.created_utc * 1000),
-        source: 'reddit',
-        _reddit_id: redditId,
-      }
-      const result = await db.collection('socials').updateOne(
-        { _reddit_id: redditId },
-        { $setOnInsert: doc },
-        { upsert: true }
-      )
-      if (result.upsertedCount) inserted++
-    }
-    return inserted
-  } catch (err) {
-    console.warn('[reddit] fetch failed for', ticker, err.message)
-    return 0
-  }
-}
-
-// ── Node-native social collectors (run fine from Railway; no Python needed) ──
-const SOCIAL_BULL_WORDS = ['bull', 'bullish', 'calls', 'moon', 'rocket', 'buy the dip', 'long', 'breakout', 'squeeze', 'rally', 'rip', 'pump', 'gains', 'undervalued', 'ath', 'beat', 'upgrade', 'to the moon']
-const SOCIAL_BEAR_WORDS = ['bear', 'bearish', 'puts', 'short', 'sell', 'dump', 'crash', 'drill', 'tank', 'overvalued', 'bagholder', 'miss', 'downgrade', 'bankrupt', 'fraud', 'rug']
-
-function naiveSocialSentiment(text) {
-  const lower = String(text || '').toLowerCase()
-  let bull = 0
-  let bear = 0
-  for (const w of SOCIAL_BULL_WORDS) if (lower.includes(w)) bull++
-  for (const w of SOCIAL_BEAR_WORDS) if (lower.includes(w)) bear++
-  if (!bull && !bear) return { sentiment: 'Neutral', score: 0 }
-  const score = Number(((bull - bear) / (bull + bear)).toFixed(2))
-  return { sentiment: score > 0 ? 'Bullish' : score < 0 ? 'Bearish' : 'Neutral', score }
-}
-
-function socialKeywordsFor(text) {
-  const kws = new Set(detectCatalysts(text))
-  const tags = String(text || '').match(/[#$][A-Za-z][A-Za-z0-9._-]{1,14}/g) || []
-  for (const tag of tags.slice(0, 6)) kws.add(tag.slice(1).toUpperCase())
-  return Array.from(kws).slice(0, 8)
-}
-
-// Bluesky AppView search — unauthenticated. Note: api.bsky.app, not
-// public.api.bsky.app (the public host 403s searchPosts).
-async function fetchBlueskyForTicker(db, ticker) {
-  try {
-    const url = `https://api.bsky.app/xrpc/app.bsky.feed.searchPosts?q=${encodeURIComponent('$' + ticker)}&limit=25&sort=latest`
-    const resp = await fetch(url, {
-      headers: { 'User-Agent': 'Mozilla/5.0 FlashFeed/1.0' },
-      signal: AbortSignal.timeout(12000),
-    })
-    if (!resp.ok) return 0
-    const json = await resp.json()
-    const posts = Array.isArray(json.posts) ? json.posts : []
-    const nowSec = Math.floor(Date.now() / 1000)
-    let inserted = 0
-    for (const post of posts) {
-      const uri = String(post.uri || '')
-      const text = String(post.record?.text || '')
-      if (!uri || !text) continue
-      const createdSec = post.record?.createdAt
-        ? Math.floor(new Date(post.record.createdAt).getTime() / 1000)
-        : nowSec
-      if (createdSec < nowSec - 7 * 86400) continue
-      const { sentiment, score } = naiveSocialSentiment(text)
-      const handle = post.author?.handle || ''
-      const postId = uri.split('/').pop()
-      const doc = {
-        platform: 'bluesky',
-        collector: 'node_bluesky',
-        ticker,
-        symbol: ticker,
-        text,
-        author: handle,
-        sentiment,
-        sentiment_score: score,
-        finance_keywords: socialKeywordsFor(text),
-        url: handle && postId ? `https://bsky.app/profile/${handle}/post/${postId}` : 'https://bsky.app',
-        fetched_at: nowSec,
-        detected_at: createdSec,
-        timestamp: createdSec,
-        created_at: new Date(createdSec * 1000),
-        source: 'bluesky',
-        _bsky_uri: uri,
-      }
-      const result = await db.collection('socials').updateOne(
-        { _bsky_uri: uri },
-        { $setOnInsert: doc },
-        { upsert: true }
-      )
-      if (result.upsertedCount) inserted++
-    }
-    return inserted
-  } catch (err) {
-    console.warn('[bluesky] fetch failed for', ticker, err.message)
-    return 0
-  }
-}
-
-// X API v2 recent search — needs TWITTER_BEARER_TOKEN + paid credits on the X
-// account. Backs off for an hour on 402 (no credits) / 429 so it activates
-// automatically the moment credits exist without hammering the API meanwhile.
-let _twitterCooldownUntil = 0
-async function fetchTwitterForTicker(db, ticker) {
-  const token = process.env.TWITTER_BEARER_TOKEN || process.env.X_BEARER_TOKEN || ''
-  if (!token || Date.now() < _twitterCooldownUntil) return 0
-  try {
-    const query = encodeURIComponent(`$${ticker} -is:retweet lang:en`)
-    const url = `https://api.x.com/2/tweets/search/recent?query=${query}&max_results=25&tweet.fields=created_at&expansions=author_id&user.fields=username`
-    const resp = await fetch(url, {
-      headers: { Authorization: `Bearer ${token}` },
-      signal: AbortSignal.timeout(12000),
-    })
-    if ([402, 403, 429].includes(resp.status)) {
-      _twitterCooldownUntil = Date.now() + 60 * 60 * 1000
-      console.warn(`[x] search returned ${resp.status} — backing off 1h (no credits or rate limited)`)
-      return 0
-    }
-    if (!resp.ok) return 0
-    const json = await resp.json()
-    const tweets = Array.isArray(json.data) ? json.data : []
-    const users = new Map((json.includes?.users || []).map(u => [u.id, u.username]))
-    const nowSec = Math.floor(Date.now() / 1000)
-    let inserted = 0
-    for (const tw of tweets) {
-      const id = String(tw.id || '')
-      const text = String(tw.text || '')
-      if (!id || !text) continue
-      const createdSec = tw.created_at ? Math.floor(new Date(tw.created_at).getTime() / 1000) : nowSec
-      const { sentiment, score } = naiveSocialSentiment(text)
-      const username = users.get(tw.author_id) || ''
-      const doc = {
-        platform: 'twitter',
-        collector: 'node_x_api',
-        ticker,
-        symbol: ticker,
-        text,
-        author: username,
-        sentiment,
-        sentiment_score: score,
-        finance_keywords: socialKeywordsFor(text),
-        url: username ? `https://x.com/${username}/status/${id}` : `https://x.com/i/status/${id}`,
-        fetched_at: nowSec,
-        detected_at: createdSec,
-        timestamp: createdSec,
-        created_at: new Date(createdSec * 1000),
-        source: 'twitter',
-        _x_id: id,
-      }
-      const result = await db.collection('socials').updateOne(
-        { _x_id: id },
-        { $setOnInsert: doc },
-        { upsert: true }
-      )
-      if (result.upsertedCount) inserted++
-    }
-    return inserted
-  } catch (err) {
-    console.warn('[x] fetch failed for', ticker, err.message)
-    return 0
-  }
-}
-
-// ApeWisdom Reddit mention aggregates → one "trending" card per ticker per day.
-// Keeps the Reddit tab alive even though Railway's IP is blocked from Reddit
-// itself. Refreshed each cycle so the numbers stay current.
-let _apeTrendsLastRun = 0
-async function fetchApeWisdomTrendsToSocials(db) {
-  if (Date.now() - _apeTrendsLastRun < 30 * 60 * 1000) return 0
-  _apeTrendsLastRun = Date.now()
-  try {
-    const resp = await fetch('https://apewisdom.io/api/v1.0/filter/all-stocks/page/1', {
-      headers: { 'User-Agent': 'Mozilla/5.0 FlashFeed/1.0' },
-      signal: AbortSignal.timeout(15000),
-    })
-    if (!resp.ok) return 0
-    const json = await resp.json()
-    const results = Array.isArray(json.results) ? json.results : []
-    const day = new Date().toISOString().slice(0, 10)
-    const nowSec = Math.floor(Date.now() / 1000)
-    let upserted = 0
-    for (const row of results.slice(0, 40)) {
-      const ticker = String(row.ticker || '').toUpperCase()
-      if (!ticker || NON_STOCK_TICKERS.has(ticker)) continue
-      const mentions = Number(row.mentions || 0)
-      const prev = Number(row.mentions_24h_ago || 0)
-      const deltaPct = prev > 0 ? Math.round(((mentions - prev) / prev) * 100) : null
-      const trendWord = deltaPct === null ? '' : ` (${deltaPct >= 0 ? '+' : ''}${deltaPct}% vs yesterday)`
-      const text = `$${ticker} is #${row.rank} on Reddit by mentions — ${mentions} mentions in the last 24h${trendWord}, ${Number(row.upvotes || 0).toLocaleString()} upvotes.`
-      const apeId = `${ticker}:${day}`
-      const result = await db.collection('socials').updateOne(
-        { _ape_id: apeId },
-        {
-          $set: { text, fetched_at: nowSec, timestamp: nowSec, detected_at: nowSec },
-          $setOnInsert: {
-            platform: 'reddit',
-            collector: 'node_apewisdom_trends',
-            ticker,
-            symbol: ticker,
-            author: 'ApeWisdom · r/all',
-            sentiment: deltaPct !== null && deltaPct >= 25 ? 'Bullish' : 'Neutral',
-            sentiment_score: deltaPct !== null && deltaPct >= 25 ? 0.5 : 0,
-            finance_keywords: ['trending', 'reddit mentions'],
-            url: `https://www.reddit.com/search/?q=%24${ticker}`,
-            created_at: new Date(nowSec * 1000),
-            source: 'reddit',
-            _ape_id: apeId,
-          },
-        },
-        { upsert: true }
-      )
-      if (result.upsertedCount) upserted++
-    }
-    return upserted
-  } catch (err) {
-    console.warn('[apewisdom-trends] fetch failed:', err.message)
-    return 0
-  }
-}
-
-// ── Node-native quote refresher (CNBC public batch quotes) ──────────────────
-// The Python quote pipeline can't run on Railway, which left every price on
-// the site frozen. This mirrors fetch_quotes_to_mongo.py's CNBC mapping.
-function parseCnbcNumber(value) {
-  if (value === null || value === undefined) return null
-  if (typeof value === 'number') return Number.isFinite(value) ? value : null
-  let text = String(value).trim().replace(/[,$%]/g, '').replace(/^\+/, '')
-  if (!text || ['N/A', 'NA', '--'].includes(text.toUpperCase())) return null
-  let mult = 1
-  const suffix = text.slice(-1).toUpperCase()
-  if (['K', 'M', 'B', 'T'].includes(suffix)) {
-    mult = { K: 1e3, M: 1e6, B: 1e9, T: 1e12 }[suffix]
-    text = text.slice(0, -1)
-  }
-  const n = Number(text) * mult
-  return Number.isFinite(n) ? n : null
-}
-
-async function fetchCnbcQuoteRows(symbols) {
-  const url = `https://quote.cnbc.com/quote-html-webservice/restQuote/symbolType/symbol?symbols=${encodeURIComponent(symbols.join('|'))}&requestMethod=itv`
-  const resp = await fetch(url, {
-    headers: { 'User-Agent': 'Mozilla/5.0 FlashFeed/1.0' },
-    signal: AbortSignal.timeout(15000),
-  })
-  if (!resp.ok) throw new Error(`CNBC quotes HTTP ${resp.status}`)
-  const payload = await resp.json()
-  const items = payload?.FormattedQuoteResult?.FormattedQuote || []
-  const rows = []
-  for (const item of items) {
-    const quoteType = String(item.type || '').toUpperCase()
-    const subType = String(item.subType || '').toUpperCase()
-    const symbol = String(item.symbol || '').toUpperCase()
-    if (!symbol || NON_STOCK_TICKERS.has(symbol)) continue
-    if (quoteType !== 'STOCK' || (subType && !subType.includes('COMMON'))) continue
-    const price = parseCnbcNumber(item.last)
-    const previousClose = parseCnbcNumber(item.previous_day_closing)
-    if (price === null) continue
-    let change
-    let changePct
-    if (previousClose && previousClose > 0) {
-      change = price - previousClose
-      changePct = (change / previousClose) * 100
-    } else {
-      change = parseCnbcNumber(item.change)
-      changePct = parseCnbcNumber(item.change_pct)
-      if (change === null || changePct === null) continue
-    }
-    const volume = parseCnbcNumber(item.volume)
-    const avgVolume = parseCnbcNumber(item.tendayavgvol)
-    rows.push({
-      ticker: symbol,
-      price: Number(price.toFixed(4)),
-      change: Number(change.toFixed(4)),
-      change_pct: Number(changePct.toFixed(4)),
-      change_percent: Number(changePct.toFixed(4)),
-      volume: volume !== null ? Math.round(volume) : null,
-      avg_volume: avgVolume !== null ? Math.round(avgVolume) : null,
-      rel_volume: volume !== null && avgVolume ? Number((volume / avgVolume).toFixed(2)) : null,
-      week_52_high: parseCnbcNumber(item.yrhiprice),
-      week_52_low: parseCnbcNumber(item.yrloprice),
-      previous_close: previousClose ? Number(previousClose.toFixed(4)) : null,
-      quote_time: item.last_timedate || item.last_time || null,
-      quote_status: 'priced',
-      quote_source: 'cnbc_public_quote',
-      quote_updated_at: Math.floor(Date.now() / 1000),
-    })
-  }
-  return rows
-}
-
-let _quoteRefresherRunning = false
-async function runNodeQuoteRefresher() {
-  if (_quoteRefresherRunning) return
-  _quoteRefresherRunning = true
-  try {
-    const db = mongoose.connection.db
-    if (!db) return
-    // Stalest quotes first so the whole screener rotates through over a few cycles
-    const docs = await db.collection('screeners')
-      .find({ ticker: { $exists: true, $ne: '' } }, { projection: { ticker: 1 } })
-      .sort({ quote_updated_at: 1 })
-      .limit(Number(process.env.QUOTE_REFRESH_BATCH || 400))
-      .toArray()
-    const tickers = Array.from(new Set(
-      docs.map(d => String(d.ticker || '').toUpperCase()).filter(t => /^[A-Z][A-Z0-9.-]{0,5}$/.test(t))
-    ))
-    if (!tickers.length) return
-    let updated = 0
-    for (let i = 0; i < tickers.length; i += 40) {
-      const chunk = tickers.slice(i, i + 40)
-      let rows = []
-      try {
-        rows = await fetchCnbcQuoteRows(chunk)
-      } catch (err) {
-        console.warn('[quotes] CNBC chunk failed:', err.message)
-        continue
-      }
-      if (!rows.length) continue
-      const ops = rows.map(row => ({
-        updateOne: {
-          filter: { ticker: row.ticker },
-          update: { $set: Object.fromEntries(Object.entries(row).filter(([, v]) => v !== null)) },
-        },
-      }))
-      const result = await db.collection('screeners').bulkWrite(ops, { ordered: false })
-      updated += (result.modifiedCount || 0) + (result.upsertedCount || 0)
-      await new Promise(resolve => setTimeout(resolve, 250))
-    }
-    console.log(`[quotes] refreshed ${updated}/${tickers.length} tickers from CNBC`)
-  } catch (err) {
-    console.error('[quotes] refresh cycle failed:', err.message)
-  } finally {
-    _quoteRefresherRunning = false
-  }
-}
-
-// Collector cycle: top momentum tickers + heavily-traded defaults, all sources.
-// StockTwits allows ~200 unauthenticated req/hr per IP, so a 10-minute cadence
-// with ≤14 tickers stays well inside the limit.
-const SOCIAL_COLLECTOR_DEFAULT_TICKERS = ['AAPL', 'TSLA', 'NVDA', 'AMD', 'MSFT', 'META', 'AMZN', 'GOOGL', 'PLTR', 'SPY', 'COIN', 'HOOD']
-let _socialCollectorRunning = false
-async function runNodeSocialCollector() {
-  if (_socialCollectorRunning) return
-  _socialCollectorRunning = true
-  try {
-    const db = mongoose.connection.db
-    if (!db) return
-    let tickers = []
-    try { tickers = await loadTopMomentumTickerSymbols(db, 8) } catch { /* screener may be empty */ }
-    tickers = Array.from(new Set([...tickers, ...SOCIAL_COLLECTOR_DEFAULT_TICKERS])).slice(0, 14)
-    let st = 0, rd = 0, bs = 0, tw = 0
-    for (const ticker of tickers) {
-      const [a, b, c, d] = await Promise.all([
-        fetchStockTwitsForTicker(db, ticker),
-        fetchRedditForTicker(db, ticker),
-        fetchBlueskyForTicker(db, ticker),
-        fetchTwitterForTicker(db, ticker),
-      ])
-      st += a; rd += b; bs += c; tw += d
-    }
-    const ape = await fetchApeWisdomTrendsToSocials(db)
-    console.log(`[social-collector] +${st} stocktwits, +${rd} reddit, +${bs} bluesky, +${tw} x, +${ape} reddit-trends (${tickers.length} tickers)`)
-  } catch (err) {
-    console.error('[social-collector] cycle failed:', err.message)
-  } finally {
-    _socialCollectorRunning = false
-  }
-}
-
-async function computeArticleSentimentSeries(db, ticker, windowMinutes, bucketMinutes) {
-  const sinceSec = Math.floor(Date.now() / 1000) - windowMinutes * 60
-  const bucketSec = bucketMinutes * 60
-  const rows = await db.collection('articles').aggregate([
-    {
-      $match: {
-        $and: [
-          { ticker: { $regex: ticker, $options: 'i' } },
-          {
-            $or: [
-              { detected_at: { $gte: sinceSec } },
-              { publish_date: { $gte: new Date(sinceSec * 1000) } },
-            ],
-          },
-        ],
-      },
-    },
-    {
-      $addFields: {
-        _event_sec: {
-          $cond: {
-            if: { $in: [{ $type: '$detected_at' }, ['int', 'long', 'double', 'decimal']] },
-            then: '$detected_at',
-            else: {
-              $cond: {
-                if: { $eq: [{ $type: '$publish_date' }, 'date'] },
-                then: { $divide: [{ $toLong: '$publish_date' }, 1000] },
-                else: 0,
-              },
-            },
-          },
-        },
-        _score: {
-          $switch: {
-            branches: [
-              { case: { $in: [{ $type: '$sentiment_score' }, ['int', 'long', 'double', 'decimal']] }, then: { $toDouble: '$sentiment_score' } },
-              { case: { $regexMatch: { input: { $toLower: { $toString: { $ifNull: ['$sentiment', ''] } } }, regex: 'bull|positive' } }, then: 1 },
-              { case: { $regexMatch: { input: { $toLower: { $toString: { $ifNull: ['$sentiment', ''] } } }, regex: 'bear|negative' } }, then: -1 },
-            ],
-            default: 0,
-          },
-        },
-      },
-    },
-    { $match: { _event_sec: { $gte: sinceSec } } },
-    {
-      $addFields: {
-        _bucket_sec: { $multiply: [{ $floor: { $divide: ['$_event_sec', bucketSec] } }, bucketSec] },
-      },
-    },
-    {
-      $group: {
-        _id: '$_bucket_sec',
-        message_count: { $sum: 1 },
-        sentiment: { $avg: '$_score' },
-      },
-    },
-    { $sort: { _id: 1 } },
-  ]).toArray()
-
-  return addSessionScaledSocialFields(rows.map(row => ({
-    time: Number(row._id || 0),
-    bucket_sec: Number(row._id || 0),
-    session: marketSessionForSec(row._id),
-    message_count: Number(row.message_count || 0),
-    message_density: Number((Number(row.message_count || 0) / bucketMinutes).toFixed(3)),
-    sentiment: Number(Number(row.sentiment || 0).toFixed(3)),
-    platforms: ['news'],
-  })), bucketMinutes)
-}
-
 async function fetchYahooCandles(ticker, range, interval) {
   const yahooRange = yahooRangeFor(range, interval)
   const yahooInterval = yahooIntervalFor(interval)
-  const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-
-  const { crumb, cookie } = await getYahooCrumb()
-
   const url = new URL(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}`)
-  url.searchParams.set('range', yahooRange)
-  url.searchParams.set('interval', yahooInterval)
-  url.searchParams.set('includePrePost', 'true')
-  url.searchParams.set('events', 'history')
-  url.searchParams.set('crumb', crumb)
+  url.searchParams.set("range", yahooRange)
+  url.searchParams.set("interval", yahooInterval)
+  url.searchParams.set("includePrePost", "true")
+  url.searchParams.set("events", "history")
 
   const resp = await fetch(url, {
-    headers: { 'User-Agent': UA, 'Cookie': cookie, 'Accept': 'application/json' },
-    signal: AbortSignal.timeout(10000),
+    headers: {
+      "User-Agent": "FeedFlashStockDashboard/0.1",
+      "Accept": "application/json",
+    },
   })
-
-  // If 401, crumb expired — invalidate and retry once
-  if (resp.status === 401) {
-    _yahooCrumb = null
-    const { crumb: c2, cookie: k2 } = await getYahooCrumb()
-    url.searchParams.set('crumb', c2)
-    const resp2 = await fetch(url, {
-      headers: { 'User-Agent': UA, 'Cookie': k2, 'Accept': 'application/json' },
-      signal: AbortSignal.timeout(10000),
-    })
-    if (!resp2.ok) throw new Error(`Yahoo HTTP ${resp2.status}`)
-    return parseYahooChartResponse(await resp2.json(), yahooRange, yahooInterval)
-  }
-
-  if (!resp.ok) throw new Error(`Yahoo HTTP ${resp.status}`)
-  return parseYahooChartResponse(await resp.json(), yahooRange, yahooInterval)
-}
-
-function parseYahooChartResponse(payload, yahooRange, yahooInterval) {
+  if (!resp.ok) throw new Error(`chart provider HTTP ${resp.status}`)
+  const payload = await resp.json()
   const result = payload?.chart?.result?.[0]
   const timestamps = result?.timestamp || []
   const quote = result?.indicators?.quote?.[0] || {}
   const candles = []
-  for (let i = 0; i < timestamps.length; i++) {
-    const open  = Number(quote.open?.[i])
-    const high  = Number(quote.high?.[i])
-    const low   = Number(quote.low?.[i])
+
+  for (let i = 0; i < timestamps.length; i += 1) {
+    const open = Number(quote.open?.[i])
+    const high = Number(quote.high?.[i])
+    const low = Number(quote.low?.[i])
     const close = Number(quote.close?.[i])
     if (![open, high, low, close].every(Number.isFinite)) continue
     if (open <= 0 || high <= 0 || low <= 0 || close <= 0) continue
+    if (high < Math.max(open, close, low) || low > Math.min(open, close, high)) continue
     candles.push({
-      time:   Number(timestamps[i]),
-      open:   Number(open.toFixed(4)),
-      high:   Number(high.toFixed(4)),
-      low:    Number(low.toFixed(4)),
-      close:  Number(close.toFixed(4)),
-      volume: Number.isFinite(Number(quote.volume?.[i])) ? Number(quote.volume[i]) : 0,
-    })
-  }
-  return { candles, provider_range: yahooRange, provider_interval: yahooInterval }
-}
-
-// CNBC harmony timeseries — candle fallback for when Yahoo is unreachable
-// from Railway. Range labels over-deliver (e.g. "1M" returns a year of daily
-// bars), so fetch a superset and trim to the requested window.
-function cnbcChartPlan(range, interval) {
-  const r = String(range || '3mo').toLowerCase()
-  const i = String(interval || '1d').toLowerCase()
-  if (i.endsWith('m') || i === '1h') {
-    return r === '1d'
-      ? { cnbcRange: '1D', lastDayOnly: true, cutoffDays: 2 }
-      : { cnbcRange: '5D', lastDayOnly: false, cutoffDays: 9 }
-  }
-  if (r === '1mo') return { cnbcRange: '1Y', lastDayOnly: false, cutoffDays: 32 }
-  if (r === '3mo') return { cnbcRange: '1Y', lastDayOnly: false, cutoffDays: 94 }
-  if (r === '6mo') return { cnbcRange: '1Y', lastDayOnly: false, cutoffDays: 187 }
-  if (r === '1y' || r === 'ytd') return { cnbcRange: '1Y', lastDayOnly: false, cutoffDays: 367 }
-  if (r === '2y') return { cnbcRange: '5Y', lastDayOnly: false, cutoffDays: 733 }
-  if (r === '5y') return { cnbcRange: '5Y', lastDayOnly: false, cutoffDays: 1830 }
-  return { cnbcRange: '1Y', lastDayOnly: false, cutoffDays: 94 }
-}
-
-async function fetchCnbcCandles(ticker, range, interval) {
-  const plan = cnbcChartPlan(range, interval)
-  const url = `https://ts-api.cnbc.com/harmony/app/charts/${plan.cnbcRange}.json?symbol=${encodeURIComponent(ticker)}`
-  const resp = await fetch(url, {
-    headers: { 'User-Agent': 'Mozilla/5.0 FlashFeed/1.0' },
-    signal: AbortSignal.timeout(12000),
-  })
-  if (!resp.ok) throw new Error(`CNBC charts HTTP ${resp.status}`)
-  const payload = await resp.json()
-  const bars = payload?.barData?.priceBars || []
-  if (!bars.length) return { candles: [], provider_range: plan.cnbcRange, provider_interval: interval }
-
-  const lastDay = String(bars[bars.length - 1]?.tradeTime || '').slice(0, 8)
-  const lastSec = Math.floor(Number(bars[bars.length - 1]?.tradeTimeinMills || Date.now()) / 1000)
-  const cutoffSec = lastSec - plan.cutoffDays * 86400
-  const candles = []
-  for (const bar of bars) {
-    if (plan.lastDayOnly && String(bar.tradeTime || '').slice(0, 8) !== lastDay) continue
-    const time = Math.floor(Number(bar.tradeTimeinMills || 0) / 1000)
-    if (!time || time < cutoffSec) continue
-    const open = Number(bar.open)
-    const high = Number(bar.high)
-    const low = Number(bar.low)
-    const close = Number(bar.close)
-    if (![open, high, low, close].every(Number.isFinite)) continue
-    if (open <= 0 || high <= 0 || low <= 0 || close <= 0) continue
-    candles.push({
-      time,
+      time: Number(timestamps[i]),
       open: Number(open.toFixed(4)),
       high: Number(high.toFixed(4)),
       low: Number(low.toFixed(4)),
       close: Number(close.toFixed(4)),
-      volume: Number.isFinite(Number(bar.volume)) ? Number(bar.volume) : 0,
+      volume: Number.isFinite(Number(quote.volume?.[i])) ? Number(quote.volume[i]) : 0,
     })
   }
-  return { candles, provider_range: `cnbc_${plan.cnbcRange}`, provider_interval: interval }
-}
-
-// Yahoo first (richer intervals), CNBC when Yahoo is blocked or empty
-async function fetchCandlesAnySource(ticker, range, interval) {
-  let yahooError = null
-  try {
-    const result = await fetchYahooCandles(ticker, range, interval)
-    if (result.candles.length) return result
-  } catch (err) {
-    yahooError = err
-  }
-  try {
-    return await fetchCnbcCandles(ticker, range, interval)
-  } catch (err) {
-    throw yahooError || err
-  }
+  return { candles, provider_range: yahooRange, provider_interval: yahooInterval }
 }
 
 function sma(values, period) {
@@ -4261,32 +3072,17 @@ app.get("/api/charts/:ticker", async (req, res) => {
     let priceStatus = "unavailable"
     let priceDetail = ""
     try {
-      candleResult = await fetchCandlesAnySource(ticker, range, interval)
+      candleResult = await fetchYahooCandles(ticker, range, interval)
       priceStatus = candleResult.candles.length ? "working" : "no_bars_returned"
     } catch (err) {
       priceDetail = String(err.message || err)
     }
 
-    let [socialRows, newsEvents, predictionEvents] = await Promise.all([
+    const [socialRows, newsEvents, predictionEvents] = await Promise.all([
       chartSocialSeries(db, ticker, socialWindow, socialBucket),
       chartNewsEvents(db, ticker, socialWindow),
       chartPredictionEvents(db, ticker, socialWindow),
     ])
-
-    // If no social data in DB, fetch live from StockTwits and retry once
-    if (socialRows.length === 0) {
-      await fetchStockTwitsForTicker(db, ticker)
-      socialRows = await chartSocialSeries(db, ticker, socialWindow, socialBucket)
-    }
-    // Still nothing — try Reddit's public search
-    if (socialRows.length === 0) {
-      await fetchRedditForTicker(db, ticker)
-      socialRows = await chartSocialSeries(db, ticker, socialWindow, socialBucket)
-    }
-    // If still no social data, fall back to article-based sentiment series
-    if (socialRows.length === 0) {
-      socialRows = await computeArticleSentimentSeries(db, ticker, socialWindow, socialBucket).catch(() => [])
-    }
     const candles = candleResult.candles
     const chartEvents = [...newsEvents, ...chartSocialEvents(socialRows), ...predictionEvents].sort((a, b) => Number(a.time || 0) - Number(b.time || 0))
     res.json({
@@ -4384,7 +3180,7 @@ app.get("/api/correlation/post-news", async (req, res) => {
     const candleMap = new Map()
     await Promise.all(tickers.map(async ticker => {
       try {
-        const result = await fetchCandlesAnySource(ticker, "5d", "1m")
+        const result = await fetchYahooCandles(ticker, "5d", "1m")
         candleMap.set(ticker, result.candles || [])
       } catch {
         candleMap.set(ticker, [])
@@ -5127,28 +3923,23 @@ app.post("/api/social/fetch", async (req, res) => {
   }
 
   try {
-    // Node collectors instead of the Python pipeline: the Python path can't
-    // reach its sources from Railway and made every Social-page search fail
-    // after a 45s timeout.
-    const db = mongoose.connection.db
-    if (!db) {
-      return res.status(503).json({ ok: false, ticker, error: "MongoDB is not connected", ms: Date.now() - started })
-    }
-    const [stocktwits, reddit, bluesky, x] = await Promise.all([
-      fetchStockTwitsForTicker(db, ticker),
-      fetchRedditForTicker(db, ticker),
-      fetchBlueskyForTicker(db, ticker),
-      fetchTwitterForTicker(db, ticker),
-    ])
+    const result = await runPythonScriptForRoute("1_News/pipeline/fetch_social_to_mongo.py", {
+      timeout: 45000,
+      extraEnv: {
+        SOCIAL_TICKERS: ticker,
+        SOCIAL_MAX_TICKERS: "1",
+        SOCIAL_MAX_WORKERS: "1",
+      },
+    })
+    const counts = parseSocialFetchForRoute(result.stdout || "")
 
-    return res.json({
-      ok: true,
+    return res.status(result.ok ? 200 : 500).json({
+      ok: result.ok,
       ticker,
-      social_new: stocktwits + reddit + bluesky + x,
-      stocktwits_new: stocktwits,
-      reddit_new: reddit,
-      bluesky_new: bluesky,
-      x_new: x,
+      ...counts,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      error: result.error,
       ms: Date.now() - started,
     })
   } catch (err) {
@@ -5201,243 +3992,21 @@ app.get("/api/social/rolling/stats", async (req, res) => {
     return res.status(500).json({ ok: false, error: String(err?.message || err), counts: {} })
   }
 })
-// ── Rolling windows: 7 window sizes per ticker (ported from V2 rolling_windows.py) ──
-// GET /api/social/rolling/windows?ticker=AAPL
-// Returns avg_sentiment, message_count, bullish/bearish/neutral at 1/3/5/10/15/30/60 min windows.
-const ROLLING_WINDOW_SIZES = [1, 3, 5, 10, 15, 30, 60]
-
-app.get("/api/social/rolling/windows", async (req, res) => {
-  try {
-    const db = mongoose.connection.db
-    if (!db) return res.status(503).json({ ok: false, error: "MongoDB not connected" })
-
-    const ticker = normalizeTickerList([req.query.ticker || req.query.symbol], 1, { ensurePrivate: false })[0] || ""
-    if (!ticker) return res.status(400).json({ ok: false, error: "ticker required" })
-
-    const now = Math.floor(Date.now() / 1000)
-    const maxWindowSec = Math.max(...ROLLING_WINDOW_SIZES) * 60
-
-    // Single aggregation: fetch all posts within the largest window, then slice per sub-window in JS
-    const pipeline = [
-      ...socialTimeStages(),
-      { $match: { _event_sec: { $gte: now - maxWindowSec }, _ticker_candidates: ticker } },
-      { $project: { _id: 0, _event_sec: 1, sentiment_score: 1, sentiment: 1 } },
-    ]
-
-    const posts = await db.collection("socials").aggregate(pipeline).toArray()
-
-    const windows = ROLLING_WINDOW_SIZES.map(w => {
-      const cutoff = now - w * 60
-      const inWindow = posts.filter(p => Number(p._event_sec) >= cutoff)
-      const scores = inWindow.map(p => {
-        const raw = p.sentiment_score ?? p.sentiment
-        if (typeof raw === 'number' && Number.isFinite(raw)) return raw
-        const s = String(raw || '').toLowerCase()
-        if (s.includes('bull') || s.includes('positive')) return 0.5
-        if (s.includes('bear') || s.includes('negative')) return -0.5
-        return 0
-      })
-      const count = inWindow.length
-      const bullish = scores.filter(s => s > 0.2).length
-      const bearish = scores.filter(s => s < -0.2).length
-      const neutral = count - bullish - bearish
-      const avg_sentiment = scores.length
-        ? +(scores.reduce((a, b) => a + b, 0) / scores.length).toFixed(4)
-        : 0
-      return { window_minutes: w, message_count: count, avg_sentiment, bullish_count: bullish, bearish_count: bearish, neutral_count: neutral }
-    })
-
-    return res.json({ ok: true, ticker, windows, computed_at: Date.now() })
-  } catch (err) {
-    console.error("GET /api/social/rolling/windows failed:", err)
-    return res.status(500).json({ ok: false, error: String(err?.message || err) })
-  }
-})
 // SOCIAL_ROLLING_API_V2_END
 
-// ── Ticker enrichment panel: aggregates news + social for TickerEnrichPanels ──
-// GET /api/ticker/:ticker/enrich
-app.get("/api/ticker/:ticker/enrich", async (req, res) => {
-  try {
-    const db = mongoose.connection.db
-    if (!db) return res.status(503).json({ ok: false, error: "MongoDB not connected" })
-    const ticker = (req.params.ticker || '').toUpperCase().trim()
-    if (!ticker) return res.status(400).json({ ok: false, error: "ticker required" })
 
-    const now = Math.floor(Date.now() / 1000)
-    const windowSec = 48 * 3600
-
-    // Latest articles
-    const articles = await db.collection("articles")
-      .find({ tickers: ticker, publish_date: { $gte: now - windowSec } })
-      .sort({ publish_date: -1 })
-      .limit(20)
-      .project({ title: 1, source: 1, publish_date: 1, url: 1, sentiment: 1, ai_sentiment_label: 1, ai_sentiment_score: 1, ml_confidence: 1, catalyst: 1 })
-      .toArray()
-
-    // AI catalyst summary: find most recent article with a catalyst
-    const catalystArticles = articles.filter(a => a.catalyst)
-    const aiSummary = catalystArticles.length > 0
-      ? `${catalystArticles.length} catalyst(s) detected: ${[...new Set(catalystArticles.map(a => a.catalyst))].join(', ')}`
-      : null
-
-    // Social breakdown by source
-    const socialPipeline = [
-      ...socialTimeStages(),
-      {
-        $match: {
-          _event_sec: { $gte: now - 24 * 3600 },
-          _ticker_candidates: ticker,
-        },
-      },
-      {
-        $group: {
-          _id: "$source",
-          count: { $sum: 1 },
-          sentSum: { $sum: { $ifNull: ["$sentiment_score", 0] } },
-          bullish: { $sum: { $cond: [{ $gt: [{ $ifNull: ["$sentiment_score", 0] }, 0.2] }, 1, 0] } },
-          bearish: { $sum: { $cond: [{ $lt: [{ $ifNull: ["$sentiment_score", 0] }, -0.2] }, 1, 0] } },
-        },
-      },
-    ]
-
-    const socialGroups = await db.collection("socials").aggregate(socialPipeline).toArray()
-
-    function buildPlatform(src) {
-      const g = socialGroups.find(s => (s._id || '').toLowerCase().includes(src))
-      if (!g) return undefined
-      return {
-        sentiment: g.count > 0 ? +(g.sentSum / g.count).toFixed(4) : 0,
-        message_count: g.count,
-        bullish_count: g.bullish,
-        bearish_count: g.bearish,
-      }
-    }
-
-    // Rumor detection: look for rumor keywords in recent posts/articles
-    const RUMOR_KW = ['rumor', 'unconfirmed', 'allegedly', 'report says', 'sources say', 'leaked', 'speculation']
-    const recentTitles = articles.map(a => (a.title || '').toLowerCase())
-    const foundRumors = RUMOR_KW.filter(kw => recentTitles.some(t => t.includes(kw)))
-
-    const newsAlertCount = articles.filter(a =>
-      a.ai_sentiment_label === 'bullish' || a.ai_sentiment_label === 'bearish'
-    ).length
-
-    return res.json({
-      ok: true,
-      data: {
-        ticker,
-        news_alert: newsAlertCount > 2 ? `High news activity: ${newsAlertCount} sentiment articles` : undefined,
-        news_alert_count: newsAlertCount > 2 ? newsAlertCount : undefined,
-        news: {
-          articles: articles.map(a => ({
-            title: a.title,
-            source: a.source,
-            publish_date: a.publish_date,
-            url: a.url,
-            sentiment: a.sentiment,
-            ai_sentiment_label: a.ai_sentiment_label,
-            ai_sentiment_score: a.ai_sentiment_score,
-            ml_confidence: a.ml_confidence,
-            catalyst: a.catalyst,
-          })),
-          ai: aiSummary,
-          sources: [...new Set(articles.map(a => a.source))].slice(0, 5),
-        },
-        social: {
-          stocktwits: buildPlatform('stocktwits'),
-          bluesky: buildPlatform('bluesky'),
-          reddit: buildPlatform('reddit'),
-          rumor: foundRumors.length > 0,
-          rumor_keywords: foundRumors,
-        },
-      },
-    })
-  } catch (err) {
-    console.error("GET /api/ticker/:ticker/enrich failed:", err)
-    return res.status(500).json({ ok: false, error: String(err?.message || err) })
-  }
-})
-
-app.use('/api/social',       socialRouter)
-app.use('/api/correlation',  correlationRouter)
-app.use('/api/settings',     settingsRouter)
-app.use('/api/decision-map', decisionMapRouter)
+app.use('/api/social',      socialRouter)
+app.use('/api/correlation', correlationRouter)
+app.use('/api/settings',    settingsRouter)
 
 // ── Health check ──────────────────────────────────────────
-app.get('/api/health', async (req, res) => {
+app.get('/api/health', (req, res) => {
   const { readyState } = mongoose.connection
   const states = { 0:'disconnected', 1:'connected', 2:'connecting', 3:'disconnecting' }
-  const mongoStatus = states[readyState] || 'unknown'
-  const mongoOk = readyState === 1
-
-  // Redis check
-  let redisStatus = 'disconnected'
-  let redisOk = false
-  try {
-    if (redisReady()) {
-      await redis.ping()
-      redisStatus = 'connected'
-      redisOk = true
-    } else {
-      redisStatus = redis ? redis.status : 'disabled'
-    }
-  } catch { redisStatus = 'error' }
-
-  // Kafka check via metadata (best-effort, won't fail health)
-  let kafkaStatus = 'unknown'
-  try {
-    if (process.env.KAFKA_BOOTSTRAP_SERVERS) {
-      kafkaStatus = 'configured'
-    } else {
-      kafkaStatus = 'not_configured'
-    }
-  } catch { kafkaStatus = 'error' }
-
-  // Disk storage check
-  let diskOk = false
-  try {
-    const db = mongoose.connection.db
-    if (db) {
-      await db.collection('disk_archive').findOne({}, { projection: { _id: 1 } })
-      diskOk = true
-    }
-  } catch { diskOk = false }
-
-  const allOk = mongoOk && redisOk
-  res.status(allOk ? 200 : 503).json({
-    status: allOk ? 'ok' : 'degraded',
-    ok: allOk,
-    services: {
-      mongo: { status: mongoStatus, ok: mongoOk },
-      redis: { status: redisStatus, ok: redisOk },
-      kafka: { status: kafkaStatus, ok: kafkaStatus === 'configured' },
-      disk:  { status: diskOk ? 'accessible' : 'unavailable', ok: diskOk },
-    },
-    time: new Date().toISOString(),
-    uptime: process.uptime(),
-  })
-})
-
-app.get('/api/kafka/status', async (req, res) => {
-  const connected = redisReady()
-  let streamLen = 0
-  let eventsRecent = 0
-  try {
-    if (connected) {
-      streamLen = await redis.xlen('flashfeed:news').catch(() => 0)
-    }
-    if (mongoose.connection.db) {
-      const cutoff = Math.floor(Date.now() / 1000) - 3600
-      eventsRecent = await mongoose.connection.db.collection('socials').countDocuments({ detected_at: { $gte: cutoff } }).catch(() => 0)
-    }
-  } catch {}
   res.json({
-    ok: connected,
-    configured: connected,
-    topic: 'flashfeed:news (Redis Stream)',
-    events_last_hour: eventsRecent || streamLen,
-    status: connected ? 'connected' : 'redis not connected — add REDIS_URL in Railway env vars',
+    status:  'ok',
+    db:      states[readyState] || 'unknown',
+    time:    new Date().toISOString(),
   })
 })
 
@@ -5503,13 +4072,6 @@ app.get("/api/status", async (req, res) => {
       },
       latest_article: latest[0] || null,
       market_window_start: latestMarketCloseCutoff().toISOString(),
-      kafka: {
-        configured: !!process.env.KAFKA_BOOTSTRAP_SERVERS,
-        broker: process.env.KAFKA_BOOTSTRAP_SERVERS
-          ? process.env.KAFKA_BOOTSTRAP_SERVERS.replace(/:\/\/[^@]*@/, '://***@')
-          : null,
-        topic: process.env.KAFKA_TOPIC || 'flashfeed-events',
-      },
       time: new Date().toISOString()
     });
   } catch (err) {
@@ -5872,14 +4434,13 @@ async function runDataRefreshCycle(db, { socialMode = "top_momentum", mode = "fa
   const fastMode = refreshMode !== "full"
   const beforeArticles = await db.collection("articles").countDocuments()
   const beforeSocial = await db.collection("socials").countDocuments()
-  const socialMomentumLimit = Number(process.env.SOCIAL_MOMENTUM_LIMIT || (fastMode ? 20 : 50))
   const socialExtraEnv = {
     SOCIAL_TICKER_SOURCE: "momentum",
-    SOCIAL_MOMENTUM_LIMIT: String(socialMomentumLimit),
-    SOCIAL_MAX_TICKERS: process.env.SOCIAL_MAX_TICKERS || String(socialMomentumLimit),
+    SOCIAL_MOMENTUM_LIMIT: process.env.SOCIAL_MOMENTUM_LIMIT || "10",
+    SOCIAL_MAX_TICKERS: process.env.SOCIAL_MAX_TICKERS || "10",
     SOCIAL_MAX_WORKERS: process.env.SOCIAL_MAX_WORKERS || "8",
     SOCIAL_REDDIT_TIMEOUT: process.env.SOCIAL_REDDIT_TIMEOUT || "4",
-    SOCIAL_REDDIT_PUBLIC_FALLBACK: process.env.SOCIAL_REDDIT_PUBLIC_FALLBACK || "true",
+    SOCIAL_REDDIT_PUBLIC_FALLBACK: process.env.SOCIAL_REDDIT_PUBLIC_FALLBACK || "false",
   }
 
   const [finvizElite, tradingViewScreener] = await Promise.all([
@@ -5902,7 +4463,7 @@ async function runDataRefreshCycle(db, { socialMode = "top_momentum", mode = "fa
   let socialTickers = []
   let publicSocialTickers = []
   if (socialMode === "top_momentum") {
-    publicSocialTickers = await loadTopMomentumTickerSymbols(db, socialMomentumLimit)
+    publicSocialTickers = await loadTopMomentumTickerSymbols(db, Number(process.env.SOCIAL_MOMENTUM_LIMIT || (fastMode ? 12 : 10)))
     socialTickers = withPrivateSocialTickers(publicSocialTickers)
     if (socialTickers.length) {
       socialExtraEnv.SOCIAL_TICKERS = socialTickers.join(",")
@@ -6819,791 +5380,7 @@ app.patch('/api/disk/settings', async (req, res) => {
   }
 })
 
-// ── AI ANALYSIS (Grok / Claude / local fallback) ─────────────────────────────
-
-const GROK_API_KEY      = process.env.GROK_API_KEY      || ''
-const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || ''
-const GROK_BASE_URL     = 'https://api.x.ai/v1'
-const GROK_MODEL        = process.env.GROK_MODEL        || 'grok-3-mini'
-const CLAUDE_MODEL      = process.env.CLAUDE_MODEL      || 'claude-haiku-4-5-20251001'
-
-// Local rule-based analysis — always available, no API key required
-async function buildLocalAnalysis(db, ticker, context) {
-  let row = null
-  let articles = []
-  try {
-    if (db) {
-      const doc = await db.collection('screeners').findOne({ ticker })
-      if (doc) row = doc
-      const arts = await db.collection('articles')
-        .find({ ticker: { $regex: ticker, $options: 'i' } })
-        .sort({ publish_date: -1 })
-        .limit(5)
-        .toArray()
-      articles = arts
-    }
-  } catch { /* non-fatal */ }
-
-  const price      = row?.price != null       ? `$${Number(row.price).toFixed(2)}`  : null
-  const change     = row?.change_pct != null  ? `${Number(row.change_pct) >= 0 ? '+' : ''}${Number(row.change_pct).toFixed(2)}%` : null
-  const mktCap     = row?.market_cap != null  ? (Number(row.market_cap) >= 1e9 ? `${(Number(row.market_cap)/1e9).toFixed(1)}B` : `${(Number(row.market_cap)/1e6).toFixed(0)}M`) : null
-  const pe         = row?.pe_ratio != null    ? Number(row.pe_ratio).toFixed(1) : null
-  const rsi        = row?.rsi != null         ? Number(row.rsi).toFixed(1) : null
-  const sentiment  = row?.avg_sentiment != null ? Number(row.avg_sentiment) : null
-  const analyst    = row?.analyst             || null
-  const beta       = row?.beta != null        ? Number(row.beta).toFixed(2) : null
-
-  const lines = []
-
-  // Price & momentum
-  if (price && change) {
-    const dir = Number(row.change_pct) >= 0 ? 'up' : 'down'
-    lines.push(`${ticker} is trading at ${price}, ${dir} ${change} today.`)
-  }
-
-  // Technicals
-  if (rsi) {
-    const rsiN = Number(rsi)
-    const rsiNote = rsiN > 70 ? 'overbought territory' : rsiN < 30 ? 'oversold territory' : 'neutral technical range'
-    lines.push(`RSI is ${rsi} (${rsiNote}).`)
-  }
-
-  // Valuation
-  const valParts = []
-  if (mktCap) valParts.push(`market cap ${mktCap}`)
-  if (pe)     valParts.push(`P/E ${pe}`)
-  if (beta)   valParts.push(`beta ${beta}`)
-  if (valParts.length) lines.push(`Valuation: ${valParts.join(', ')}.`)
-
-  // Analyst
-  if (analyst) lines.push(`Analyst consensus: ${analyst}.`)
-
-  // News sentiment
-  if (sentiment != null) {
-    const sentLabel = sentiment > 0.2 ? 'bullish' : sentiment < -0.2 ? 'bearish' : 'mixed/neutral'
-    lines.push(`Recent news sentiment is ${sentLabel} (score ${sentiment.toFixed(2)}).`)
-  }
-
-  // Top headline
-  if (articles.length) {
-    lines.push(`Latest headline: "${articles[0].title?.slice(0, 100) || 'N/A'}".`)
-  }
-
-  // Context passthrough
-  if (context && !lines.length) lines.push(`Context: ${context}`)
-
-  if (!lines.length) lines.push(`No live data found for ${ticker}. Run a fetch cycle to populate the dashboard.`)
-
-  return { text: lines.join(' '), model: 'local-rules' }
-}
-
-async function callGrok(ticker, context, prompt) {
-  const systemMsg = `You are a concise financial analyst. Analyze the stock data for ${ticker}. Be direct, factual, highlight key signals. Max 120 words.`
-  const userMsg = prompt || `Analyze ${ticker}. Context: ${context || 'No additional context provided.'}`
-  const resp = await fetch(`${GROK_BASE_URL}/chat/completions`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${GROK_API_KEY}` },
-    body: JSON.stringify({ model: GROK_MODEL, messages: [{ role: 'system', content: systemMsg }, { role: 'user', content: userMsg }], max_tokens: 200, temperature: 0.3 }),
-  })
-  if (!resp.ok) throw new Error(`Grok ${resp.status}: ${(await resp.text()).slice(0, 120)}`)
-  const data = await resp.json()
-  return { text: data.choices?.[0]?.message?.content || '', model: GROK_MODEL }
-}
-
-async function callClaude(ticker, context, prompt) {
-  const systemMsg = `You are a concise financial analyst. Analyze the stock data for ${ticker}. Be direct, factual, highlight key signals. Respond in 100 words or fewer.`
-  const userMsg = prompt || `Analyze ${ticker}. Context: ${context || 'No additional context provided.'}`
-  const resp = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': ANTHROPIC_API_KEY,
-      'anthropic-version': '2023-06-01',
-    },
-    body: JSON.stringify({
-      model: CLAUDE_MODEL,
-      max_tokens: 200,
-      system: systemMsg,
-      messages: [{ role: 'user', content: userMsg }],
-    }),
-  })
-  if (!resp.ok) throw new Error(`Claude ${resp.status}: ${(await resp.text()).slice(0, 120)}`)
-  const data = await resp.json()
-  return { text: data.content?.[0]?.text || '', model: CLAUDE_MODEL }
-}
-
-app.post('/api/grok/analyze', async (req, res) => {
-  const { ticker, context, prompt } = req.body || {}
-  if (!ticker) return res.status(400).json({ ok: false, error: 'ticker required' })
-
-  // Priority: Grok → Claude → local rule-based fallback
-  try {
-    if (GROK_API_KEY) {
-      const { text, model } = await callGrok(ticker, context, prompt)
-      return res.json({ ok: true, ticker, analysis: text, model })
-    }
-    if (ANTHROPIC_API_KEY) {
-      const { text, model } = await callClaude(ticker, context, prompt)
-      return res.json({ ok: true, ticker, analysis: text, model })
-    }
-    // Always-available local fallback
-    const db = mongoose.connection.db || null
-    const { text, model } = await buildLocalAnalysis(db, ticker, context)
-    return res.json({ ok: true, ticker, analysis: text, model })
-  } catch (err) {
-    // If the external API failed, fall through to local
-    try {
-      const db = mongoose.connection.db || null
-      const { text, model } = await buildLocalAnalysis(db, ticker, context)
-      return res.json({ ok: true, ticker, analysis: text, model: `${model} (api-fallback)` })
-    } catch (e2) {
-      return res.status(500).json({ ok: false, error: String(err.message || err) })
-    }
-  }
-})
-
-app.get('/api/grok/status', (req, res) => {
-  const engine = GROK_API_KEY ? 'grok' : ANTHROPIC_API_KEY ? 'claude' : 'local'
-  const model  = GROK_API_KEY ? GROK_MODEL : ANTHROPIC_API_KEY ? CLAUDE_MODEL : 'local-rules'
-  res.json({ configured: true, engine, model,
-    grok: !!GROK_API_KEY, claude: !!ANTHROPIC_API_KEY })
-})
-
-// ── Key Stats: live 52W, Beta, Analyst, Target, Short Float, Earnings ─────────
-// Tries MongoDB first (finviz_screener merged with screeners), then falls back
-// to a live Yahoo Finance quoteSummary fetch so stats are never blank.
-// Yahoo now requires a cookie + crumb pair for quoteSummary from most IPs.
-let _yahooCrumb = null, _yahooCookie = null, _yahooCrumbExpiry = 0
-async function getYahooCrumb() {
-  if (_yahooCrumb && Date.now() < _yahooCrumbExpiry) return { crumb: _yahooCrumb, cookie: _yahooCookie }
-  const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
-  try {
-    const cResp = await fetch('https://fc.yahoo.com', {
-      headers: { 'User-Agent': UA },
-      redirect: 'manual',
-      signal: AbortSignal.timeout(8000),
-    }).catch(() => null)
-    const setCookie = cResp?.headers?.get('set-cookie') || ''
-    const cookie = setCookie.split(';')[0] || ''
-    if (!cookie) return null
-    const crumbResp = await fetch('https://query1.finance.yahoo.com/v1/test/getcrumb', {
-      headers: { 'User-Agent': UA, 'Cookie': cookie },
-      signal: AbortSignal.timeout(8000),
-    })
-    if (!crumbResp.ok) return null
-    const crumb = (await crumbResp.text()).trim()
-    if (!crumb || crumb.includes('<')) return null
-    _yahooCrumb = crumb
-    _yahooCookie = cookie
-    _yahooCrumbExpiry = Date.now() + 30 * 60 * 1000
-    return { crumb, cookie }
-  } catch (e) {
-    console.warn('[keystats] Yahoo crumb fetch failed:', e.message)
-    return null
-  }
-}
-
-// Finviz quote page snapshot table — label/value pairs, works without auth
-async function fetchFinvizKeystats(ticker) {
-  const resp = await fetch(`https://finviz.com/quote.ashx?t=${encodeURIComponent(ticker)}&p=d`, {
-    headers: {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-      'Accept': 'text/html,application/xhtml+xml',
-      'Accept-Language': 'en-US,en;q=0.9',
-    },
-    redirect: 'follow',
-    signal: AbortSignal.timeout(10000),
-  })
-  if (!resp.ok) { console.warn(`[keystats] Finviz HTTP ${resp.status} for ${ticker}`); return null }
-  const html = await resp.text()
-  const pairRe = /<div class="snapshot-td-label">([\s\S]*?)<\/div>[\s\S]*?<div class="snapshot-td-content">([\s\S]*?)<\/div>/g
-  const strip = s => s.replace(/<[^>]+>/g, '').replace(/&amp;/g, '&').trim()
-  const map = {}
-  let m
-  while ((m = pairRe.exec(html)) !== null) {
-    const label = strip(m[1])
-    if (label && map[label] === undefined) map[label] = strip(m[2])
-  }
-  if (!Object.keys(map).length) return null
-
-  const num = v => {
-    if (v == null || v === '-' || v === '') return null
-    const n = parseFloat(String(v).replace(/[%,$]/g, ''))
-    return Number.isFinite(n) ? n : null
-  }
-  const cap = v => {
-    if (!v || v === '-') return null
-    const n = parseFloat(v)
-    if (!Number.isFinite(n)) return null
-    if (/T$/i.test(v)) return n * 1e12
-    if (/B$/i.test(v)) return n * 1e9
-    if (/M$/i.test(v)) return n * 1e6
-    return n
-  }
-  const recomNum = num(map['Recom'])
-  const analyst = recomNum == null ? null
-    : recomNum <= 1.5 ? 'Strong Buy'
-    : recomNum <= 2.5 ? 'Buy'
-    : recomNum <= 3.5 ? 'Hold'
-    : recomNum <= 4.5 ? 'Sell'
-    : 'Strong Sell'
-
-  return {
-    beta:          num(map['Beta']),
-    analyst,
-    target_price:  num(map['Target Price']),
-    float_short:   num(map['Short Float']),
-    earnings_date: map['Earnings'] && map['Earnings'] !== '-' ? map['Earnings'] : null,
-    pe_ratio:      num(map['P/E']),
-    forward_pe:    num(map['Forward P/E']),
-    market_cap:    cap(map['Market Cap']),
-  }
-}
-
-app.get('/api/ticker/:ticker/keystats', async (req, res) => {
-  const ticker = String(req.params.ticker || '').toUpperCase().trim().replace(/[^A-Z0-9.\-]/g, '')
-  if (!ticker) return res.status(400).json({ ok: false, error: 'ticker required' })
-
-  const cacheKey = `keystats:v2:${ticker}`
-  if (redisReady()) {
-    try {
-      const hit = await redis.get(cacheKey)
-      if (hit) return res.json({ ok: true, ticker, ...JSON.parse(hit), _source: 'cache' })
-    } catch (_) {}
-  }
-
-  let stats = null
-  const db = mongoose.connection.db
-
-  // 1. MongoDB — merge finviz_screener (yfinance enricher writes here) + screeners
-  if (db) {
-    try {
-      const [yf, sc] = await Promise.all([
-        db.collection('finviz_screener').findOne({ ticker }, { projection: { _id: 0 } }).catch(() => null),
-        db.collection('screeners').findOne({ ticker }, { projection: { _id: 0 } }).catch(() => null),
-      ])
-      const m = { ...(sc || {}), ...(yf || {}) }
-      const h52 = m.high_52w ?? m.week_52_high ?? m.fiftyTwoWeekHigh ?? m['52W High'] ?? m['week52High']
-      const l52 = m.low_52w  ?? m.week_52_low  ?? m.fiftyTwoWeekLow  ?? m['52W Low']  ?? m['week52Low']
-      const betaVal = m.beta ?? m.Beta ?? m.beta_1y ?? m.betaFiveYMonthly
-      const analystVal = m.analyst ?? m.Recom ?? m.recommendation ?? m['Analyst Recom'] ?? m.analyst_recom ?? m.rating ?? m.recommendationKey
-      const targetVal = m.target_price ?? m.targetMeanPrice ?? m['Target Price'] ?? m.target ?? m.price_target ?? m.priceTarget
-      const floatShortVal = m.float_short ?? m['Short Float'] ?? m.short_float ?? m.short_float_pct ?? m.shortPercentOfFloat
-      const earningsVal = m.earnings_date ?? m.Earnings ?? m.earnings ?? m.next_earnings ?? m.earningsDate ?? m.nextEarningsDate
-      if (h52 != null || betaVal != null || analystVal || targetVal != null || m.market_cap != null || m.pe_ratio != null) {
-        stats = {
-          high_52w:     h52 != null ? Number(h52) : null,
-          low_52w:      l52 != null ? Number(l52) : null,
-          beta:         betaVal != null ? Number(betaVal) : null,
-          analyst:      analystVal ?? null,
-          target_price: targetVal != null ? Number(targetVal) : null,
-          float_short:  floatShortVal != null ? Number(floatShortVal) : null,
-          earnings_date: earningsVal ?? null,
-          pe_ratio:     m.pe_ratio ?? m.pe ?? m['P/E'] ?? m.trailingPE ?? null,
-          forward_pe:   m.forward_pe ?? m.forwardPE ?? null,
-          market_cap:   m.market_cap ?? m.marketCap ?? null,
-        }
-      }
-    } catch (_) {}
-  }
-
-  // 2. Live Yahoo Finance fetch when MongoDB is missing the key fields
-  const needsLive = !stats || stats.beta == null || stats.analyst == null || stats.target_price == null || stats.float_short == null || stats.earnings_date == null
-  if (needsLive) {
-    try {
-      const yc = await getYahooCrumb()
-      const crumbQs = yc ? `&crumb=${encodeURIComponent(yc.crumb)}` : ''
-      const url = `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${ticker}?modules=summaryDetail,defaultKeyStatistics,financialData,calendarEvents${crumbQs}`
-      const resp = await fetch(url, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-          'Accept': 'application/json',
-          'Accept-Language': 'en-US,en;q=0.9',
-          ...(yc ? { 'Cookie': yc.cookie } : {}),
-        },
-        signal: AbortSignal.timeout(8000),
-      })
-      if (resp.ok) {
-        const json = await resp.json()
-        const r = json?.quoteSummary?.result?.[0]
-        if (r) {
-          const rv = (obj, key) => { const v = obj?.[key]; return v?.raw ?? (typeof v === 'number' ? v : null) }
-          const sd = r.summaryDetail || {}, ks = r.defaultKeyStatistics || {}
-          const fd = r.financialData || {}, cal = r.calendarEvents || {}
-          const recKey = typeof fd.recommendationKey === 'string' ? fd.recommendationKey : ''
-          const analystLabel = { strong_buy: 'Strong Buy', buy: 'Buy', hold: 'Hold', underperform: 'Sell', sell: 'Strong Sell' }[recKey] ?? null
-          let earnings_date = null
-          try {
-            const ed = cal.earnings?.earningsDate?.[0]
-            if (ed?.raw) earnings_date = new Date(ed.raw * 1000).toISOString().split('T')[0]
-          } catch (_) {}
-          const shortPct = rv(ks, 'shortPercentOfFloat')
-          stats = {
-            high_52w:     rv(sd, 'fiftyTwoWeekHigh'),
-            low_52w:      rv(sd, 'fiftyTwoWeekLow'),
-            beta:         rv(sd, 'beta') ?? rv(ks, 'beta'),
-            analyst:      analystLabel,
-            target_price: rv(fd, 'targetMeanPrice'),
-            float_short:  shortPct != null ? +Number(shortPct * 100).toFixed(2) : null,
-            earnings_date,
-            pe_ratio:     rv(sd, 'trailingPE'),
-            forward_pe:   rv(sd, 'forwardPE'),
-            market_cap:   rv(sd, 'marketCap'),
-            _source: 'yahoo',
-          }
-        }
-      } else {
-        console.warn(`[keystats] Yahoo Finance HTTP ${resp.status} for ${ticker}`)
-      }
-    } catch (err) {
-      console.warn(`[keystats] Yahoo Finance v10 error for ${ticker}:`, err.message)
-    }
-
-    // Fallback: Yahoo Finance v7/quote — simpler endpoint, fewer IP blocks
-    if (!stats || stats.analyst == null || stats.beta == null) {
-      try {
-        const v7url = `https://query2.finance.yahoo.com/v7/finance/quote?symbols=${ticker}&fields=beta,recommendationKey,targetMeanPrice,shortPercentOfFloat,earningsTimestampStart,fiftyTwoWeekHigh,fiftyTwoWeekLow,trailingPE,marketCap,forwardPE`
-        const v7resp = await fetch(v7url, {
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-            'Accept': 'application/json',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Referer': 'https://finance.yahoo.com',
-          },
-          signal: AbortSignal.timeout(8000),
-        })
-        if (v7resp.ok) {
-          const v7json = await v7resp.json()
-          const q = v7json?.quoteResponse?.result?.[0]
-          if (q) {
-            const recKey = typeof q.recommendationKey === 'string' ? q.recommendationKey : ''
-            const analystLabel = { strong_buy: 'Strong Buy', buy: 'Buy', hold: 'Hold', underperform: 'Sell', sell: 'Strong Sell' }[recKey] ?? null
-            let earnings_date = null
-            if (q.earningsTimestampStart) {
-              try { earnings_date = new Date(Number(q.earningsTimestampStart) * 1000).toISOString().split('T')[0] } catch (_) {}
-            }
-            const shortRaw = q.shortPercentOfFloat
-            const prevStats = stats || {}
-            stats = {
-              high_52w:     prevStats.high_52w     ?? (q.fiftyTwoWeekHigh != null ? Number(q.fiftyTwoWeekHigh) : null),
-              low_52w:      prevStats.low_52w      ?? (q.fiftyTwoWeekLow  != null ? Number(q.fiftyTwoWeekLow)  : null),
-              beta:         prevStats.beta         ?? (q.beta             != null ? Number(q.beta)             : null),
-              analyst:      prevStats.analyst      ?? analystLabel,
-              target_price: prevStats.target_price ?? (q.targetMeanPrice  != null ? Number(q.targetMeanPrice)  : null),
-              float_short:  prevStats.float_short  ?? (shortRaw           != null ? +Number(shortRaw * 100).toFixed(2) : null),
-              earnings_date: prevStats.earnings_date ?? earnings_date,
-              pe_ratio:     prevStats.pe_ratio     ?? (q.trailingPE       != null ? Number(q.trailingPE)       : null),
-              forward_pe:   prevStats.forward_pe   ?? (q.forwardPE        != null ? Number(q.forwardPE)        : null),
-              market_cap:   prevStats.market_cap   ?? (q.marketCap        != null ? Number(q.marketCap)        : null),
-              _source: 'yahoo_v7',
-            }
-          }
-        } else {
-          console.warn(`[keystats] Yahoo Finance v7 HTTP ${v7resp.status} for ${ticker}`)
-        }
-      } catch (err) {
-        console.warn(`[keystats] Yahoo Finance v7 error for ${ticker}:`, err.message)
-      }
-    }
-
-    // Fallback: Finviz quote page — fills whatever is still missing
-    const missingExtended = !stats || stats.beta == null || stats.analyst == null ||
-      stats.target_price == null || stats.float_short == null || stats.earnings_date == null
-    if (missingExtended) {
-      try {
-        const fv = await fetchFinvizKeystats(ticker)
-        if (fv) {
-          const prev = stats || {}
-          stats = {
-            high_52w:      prev.high_52w      ?? null,
-            low_52w:       prev.low_52w       ?? null,
-            beta:          prev.beta          ?? fv.beta,
-            analyst:       prev.analyst       ?? fv.analyst,
-            target_price:  prev.target_price  ?? fv.target_price,
-            float_short:   prev.float_short   ?? fv.float_short,
-            earnings_date: prev.earnings_date ?? fv.earnings_date,
-            pe_ratio:      prev.pe_ratio      ?? fv.pe_ratio,
-            forward_pe:    prev.forward_pe    ?? fv.forward_pe,
-            market_cap:    prev.market_cap    ?? fv.market_cap,
-            _source: prev._source ? `${prev._source}+finviz` : 'finviz',
-          }
-        }
-      } catch (err) {
-        console.warn(`[keystats] Finviz error for ${ticker}:`, err.message)
-      }
-    }
-  }
-
-  if (!stats) return res.status(404).json({ ok: false, ticker, error: 'No key stats available' })
-
-  // Cache complete results for 30 minutes; incomplete ones briefly so retries can fill gaps
-  const isComplete = stats.beta != null || stats.analyst != null || stats.target_price != null
-  if (redisReady()) {
-    try { await redis.set(cacheKey, JSON.stringify(stats), 'EX', isComplete ? 1800 : 180) } catch (_) {}
-  }
-
-  res.json({ ok: true, ticker, ...stats })
-})
-
-// ── Reddit OAuth API ─────────────────────────────────────────────────────────
-
-const REDDIT_CLIENT_ID     = process.env.REDDIT_CLIENT_ID     || ''
-const REDDIT_CLIENT_SECRET = process.env.REDDIT_CLIENT_SECRET || ''
-const REDDIT_USER_AGENT    = 'FlashFeed/1.0 (financial dashboard; contact via github.com/Rybread15325)'
-
-let _redditToken       = null
-let _redditTokenExpiry = 0
-
-async function getRedditToken() {
-  if (_redditToken && Date.now() < _redditTokenExpiry) return _redditToken
-  if (!REDDIT_CLIENT_ID || !REDDIT_CLIENT_SECRET) return null
-  try {
-    const auth = Buffer.from(`${REDDIT_CLIENT_ID}:${REDDIT_CLIENT_SECRET}`).toString('base64')
-    const resp = await fetch('https://www.reddit.com/api/v1/access_token', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Basic ${auth}`,
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'User-Agent': REDDIT_USER_AGENT,
-      },
-      body: 'grant_type=client_credentials',
-    })
-    if (!resp.ok) { console.warn('Reddit token fetch failed:', resp.status); return null }
-    const data = await resp.json()
-    _redditToken = data.access_token
-    _redditTokenExpiry = Date.now() + Math.max(0, (Number(data.expires_in) - 60)) * 1000
-    return _redditToken
-  } catch (e) {
-    console.warn('Reddit token error:', e.message)
-    return null
-  }
-}
-
-app.get('/api/reddit/status', async (req, res) => {
-  const configured = !!(REDDIT_CLIENT_ID && REDDIT_CLIENT_SECRET)
-  let tokenOk = false
-  if (configured) {
-    const tok = await getRedditToken()
-    tokenOk = !!tok
-  }
-  res.json({
-    configured: true, // public JSON search needs no credentials
-    oauth_configured: configured,
-    token_ok: tokenOk,
-    client_id_set: !!REDDIT_CLIENT_ID,
-    client_secret_set: !!REDDIT_CLIENT_SECRET,
-  })
-})
-
-app.get('/api/reddit/posts/:ticker', async (req, res) => {
-  const ticker = (req.params.ticker || '').toUpperCase().trim()
-  if (!ticker) return res.status(400).json({ ok: false, posts: [], error: 'ticker required' })
-
-  const limit = Math.min(Number(req.query.limit) || 10, 25)
-  const trace = []
-  const SUBS  = 'wallstreetbets+investing+stocks+StockMarket+options+SecurityAnalysis+ValueInvesting'
-  const BROWS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-    'Accept': 'application/json',
-    'Accept-Language': 'en-US,en;q=0.9',
-  }
-
-  // Filter: keep only posts that actually mention the ticker
-  const re = new RegExp(`(?:^|\\W)\\$?${ticker}(?:\\W|$)`, 'i')
-  const isRelevant = (title = '', text = '') => re.test(title) || re.test(text)
-
-  const mapJson = (children = []) => children
-    .map(c => c.data).filter(d => d && d.id && isRelevant(d.title, d.selftext))
-    .map(d => ({
-      id: d.id, title: d.title, subreddit: d.subreddit, author: d.author,
-      score: d.score, num_comments: d.num_comments,
-      url: `https://www.reddit.com${d.permalink}`,
-      preview: (d.selftext || '').slice(0, 200).trim() || null,
-      created_utc: d.created_utc,
-    }))
-
-  try {
-    // 1. Reddit OAuth — works from any IP when credentials are set
-    if (REDDIT_CLIENT_ID && REDDIT_CLIENT_SECRET) {
-      const token = await getRedditToken()
-      if (token) {
-        const q = encodeURIComponent(`$${ticker}`)
-        const url = `https://oauth.reddit.com/r/${SUBS}/search.json?q=${q}&restrict_sr=on&sort=new&limit=${limit}&t=month&type=link`
-        const resp = await fetch(url, { headers: { 'Authorization': `Bearer ${token}`, 'User-Agent': REDDIT_USER_AGENT } })
-        if (resp.ok) {
-          const data = await resp.json()
-          const posts = mapJson(data?.data?.children ?? []).slice(0, limit)
-          if (posts.length > 0) return res.json({ ok: true, ticker, posts, source: 'oauth' })
-        }
-      }
-    }
-
-    // 2. Reddit public JSON — try old.reddit.com and www.reddit.com, with and without $ prefix
-    for (const domain of ['old.reddit.com', 'www.reddit.com']) {
-      for (const rawQ of [`$${ticker}`, ticker]) {
-        try {
-          const q = encodeURIComponent(rawQ)
-          const url = `https://${domain}/r/${SUBS}/search.json?q=${q}&restrict_sr=on&sort=new&t=month&limit=${limit * 2}`
-          const resp = await fetch(url, { headers: BROWS, signal: AbortSignal.timeout(8000) })
-          if (!resp.ok) { trace.push(`json ${domain} "${rawQ}": HTTP ${resp.status}`); continue }
-          const text = await resp.text()
-          if (text.trimStart().startsWith('<')) { trace.push(`json ${domain} "${rawQ}": HTML (IP blocked)`); continue }
-          const data = JSON.parse(text)
-          const posts = mapJson(data?.data?.children ?? []).slice(0, limit)
-          if (posts.length > 0) return res.json({ ok: true, ticker, posts, source: 'reddit-json' })
-          trace.push(`json ${domain} "${rawQ}": 0 relevant of ${data?.data?.children?.length ?? 0}`)
-        } catch (e) { trace.push(`json ${domain} "${rawQ}": ${e.message}`) }
-      }
-    }
-
-    // 3. Arctic Shift (Pushshift successor — independent infra, no Reddit IP block)
-    try {
-      const asSubs = ['wallstreetbets', 'stocks', 'investing']
-      const asResults = await Promise.allSettled(asSubs.map(sub =>
-        fetch(`https://arctic-shift.photon-reddit.com/api/posts/search?query=${encodeURIComponent(ticker)}&subreddit=${sub}&limit=${limit}&sort=desc`, {
-          headers: { 'User-Agent': 'FlashFeed/1.0 financial-dashboard' },
-          signal: AbortSignal.timeout(8000),
-        }).then(async r => {
-          if (!r.ok) { trace.push(`arctic ${sub}: HTTP ${r.status}`); return null }
-          const j = await r.json()
-          if (j?.error) { trace.push(`arctic ${sub}: ${j.error}`); return null }
-          return j
-        }).catch(e => { trace.push(`arctic ${sub}: ${e.message}`); return null })
-      ))
-      const asPosts = asResults
-        .flatMap(r => (r.status === 'fulfilled' && Array.isArray(r.value?.data) ? r.value.data : []))
-        .filter(d => d && d.id && isRelevant(d.title, d.selftext))
-        .sort((a, b) => (b.created_utc || 0) - (a.created_utc || 0))
-        .slice(0, limit)
-        .map(d => ({
-          id: d.id, title: d.title, subreddit: d.subreddit, author: d.author,
-          score: d.score ?? null, num_comments: d.num_comments ?? null,
-          url: `https://www.reddit.com/r/${d.subreddit}/comments/${d.id}`,
-          preview: (d.selftext || '').slice(0, 200).trim() || null,
-          created_utc: d.created_utc,
-        }))
-      if (asPosts.length > 0) return res.json({ ok: true, ticker, posts: asPosts, source: 'arctic-shift' })
-    } catch (_) {}
-
-    // 4. PullPush archive — may lag weeks/months behind, but real relevant posts
-    for (const rawQ of [`$${ticker}`, ticker]) {
-      try {
-        const q = encodeURIComponent(rawQ)
-        const ppUrl = `https://api.pullpush.io/reddit/search/submission/?q=${q}&size=${limit * 3}&sort=desc&sort_type=created_utc`
-        const ppResp = await fetch(ppUrl, {
-          headers: { 'User-Agent': 'FlashFeed/1.0 financial-dashboard' },
-          signal: AbortSignal.timeout(10000),
-        })
-        if (!ppResp.ok) { trace.push(`pullpush "${rawQ}": HTTP ${ppResp.status}`); continue }
-        const ppData = await ppResp.json()
-        trace.push(`pullpush "${rawQ}": ${(ppData.data || []).length} raw`)
-        const posts = (ppData.data || [])
-          .filter(d => d && d.id && isRelevant(d.title, d.selftext))
-          .slice(0, limit)
-          .map(d => ({
-            id: d.id, title: d.title, subreddit: d.subreddit, author: d.author,
-            score: d.score || 0, num_comments: d.num_comments || 0,
-            url: `https://www.reddit.com/r/${d.subreddit}/comments/${d.id}`,
-            preview: (d.selftext || '').slice(0, 200).trim() || null,
-            created_utc: d.created_utc,
-          }))
-        if (posts.length > 0) return res.json({ ok: true, ticker, posts, source: 'pullpush' })
-      } catch (e) { trace.push(`pullpush "${rawQ}": ${e.message}`) }
-    }
-
-    // 5. Reddit RSS — filter strictly for relevance (blocked IPs return generic posts)
-    const entries = await fetchRedditRss(ticker, limit * 3)
-    const posts = entries
-      .filter(e => isRelevant(e.title))
-      .slice(0, limit)
-      .map(e => ({
-        id: e.id, title: e.title, subreddit: e.subreddit, author: e.author,
-        score: null, num_comments: null, url: e.link, preview: null, created_utc: e.created_utc,
-      }))
-    trace.push(`rss: ${entries.length} entries, ${posts.length} relevant`)
-
-    // 6. ApeWisdom aggregate buzz — Reddit mention stats survive IP blocks
-    //    because ApeWisdom runs its own scrapers
-    let buzz = null
-    if (posts.length === 0) {
-      try {
-        for (let page = 1; page <= 3 && !buzz; page++) {
-          const awResp = await fetch(`https://apewisdom.io/api/v1.0/filter/all-stocks/page/${page}`, {
-            headers: { 'User-Agent': 'FlashFeed/1.0 financial-dashboard' },
-            signal: AbortSignal.timeout(8000),
-          })
-          if (!awResp.ok) { trace.push(`apewisdom p${page}: HTTP ${awResp.status}`); break }
-          const awData = await awResp.json()
-          const results = awData.results || []
-          const hit = results.find(r => String(r.ticker).toUpperCase() === ticker)
-          if (hit) {
-            buzz = {
-              rank: hit.rank, mentions: hit.mentions, upvotes: hit.upvotes,
-              rank_24h_ago: hit.rank_24h_ago, mentions_24h_ago: hit.mentions_24h_ago,
-            }
-          }
-          if (results.length === 0) break
-        }
-        if (!buzz) trace.push('apewisdom: ticker not in top 300 mentioned')
-      } catch (e) { trace.push(`apewisdom: ${e.message}`) }
-    }
-
-    return res.json({
-      ok: true, ticker, posts, buzz,
-      source: posts.length > 0 ? 'rss' : buzz ? 'apewisdom' : 'none',
-      ...(posts.length === 0 || req.query.debug === '1' ? { trace } : {}),
-    })
-  } catch (e) {
-    return res.json({ ok: false, posts: [], error: String(e.message || e), trace })
-  }
-})
-
-// ── Twitter / X API v2 ────────────────────────────────────────────────────────
-const TWITTER_BEARER_TOKEN = process.env.TWITTER_BEARER_TOKEN || process.env.X_BEARER_TOKEN || ''
-
-app.get('/api/twitter/status', (req, res) => {
-  res.json({ configured: !!TWITTER_BEARER_TOKEN })
-})
-
-app.get('/api/twitter/posts/:ticker', async (req, res) => {
-  const ticker = (req.params.ticker || '').toUpperCase().trim()
-  if (!ticker) return res.status(400).json({ ok: false, posts: [], error: 'ticker required' })
-
-  const limit = Math.min(Math.max(1, Number(req.query.limit) || 10), 100)
-
-  // 1. Twitter API v2 (when bearer token is configured)
-  if (TWITTER_BEARER_TOKEN) {
-    try {
-      const q = encodeURIComponent(`$${ticker} lang:en -is:retweet`)
-      const fields = 'created_at,public_metrics,author_id,text'
-      const url = `https://api.twitter.com/2/tweets/search/recent?query=${q}&tweet.fields=${fields}&expansions=author_id&user.fields=username,name,verified&max_results=${limit}`
-      const resp = await fetch(url, { headers: { 'Authorization': `Bearer ${TWITTER_BEARER_TOKEN}` } })
-
-      if (resp.ok) {
-        const data = await resp.json()
-        if (!data.errors) {
-          const userMap = new Map()
-          for (const u of (data.includes?.users ?? [])) userMap.set(u.id, u)
-          const posts = (data.data ?? []).map(t => {
-            const user = userMap.get(t.author_id) || {}
-            return {
-              id: t.id, text: t.text,
-              author: user.username || t.author_id,
-              author_name: user.name || '',
-              verified: user.verified || false,
-              likes: t.public_metrics?.like_count ?? 0,
-              retweets: t.public_metrics?.retweet_count ?? 0,
-              replies: t.public_metrics?.reply_count ?? 0,
-              created_at: t.created_at,
-              url: `https://x.com/${user.username || 'i'}/status/${t.id}`,
-            }
-          })
-          return res.json({ ok: true, ticker, posts, source: 'twitter' })
-        }
-      }
-    } catch (_) {}
-  }
-
-  // 2. StockTwits fallback — public API, no auth required, financial-focused
-  try {
-    const stUrl = `https://api.stocktwits.com/api/2/streams/symbol/${encodeURIComponent(ticker)}.json?limit=${Math.min(limit, 30)}`
-    const stResp = await fetch(stUrl, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; FlashFeed/1.0)' },
-      signal: AbortSignal.timeout(10000),
-    })
-    if (stResp.ok) {
-      const stData = await stResp.json()
-      const posts = (stData.messages || []).map(msg => {
-        const sentimentRaw = msg.entities?.sentiment?.basic
-        return {
-          id:         String(msg.id),
-          text:       msg.body || '',
-          author:     msg.user?.username || '',
-          author_name: msg.user?.name || '',
-          verified:   msg.user?.official || false,
-          likes:      msg.likes?.total || 0,
-          retweets:   0,
-          replies:    0,
-          sentiment:  sentimentRaw || null,
-          created_at: msg.created_at,
-          url:        `https://stocktwits.com/symbol/${ticker}`,
-        }
-      })
-      return res.json({ ok: true, ticker, posts, source: 'stocktwits' })
-    }
-  } catch (err) {
-    console.warn(`[stocktwits-fallback] ${ticker}:`, err.message)
-  }
-
-  res.json({ ok: true, ticker, posts: [], source: 'none', note: 'No social posts found' })
-})
-
-// ── Session beacon: browser calls this on pagehide to trigger auto-save ──────
-app.post('/api/session/save', async (req, res) => {
-  // Accepts text/plain body from navigator.sendBeacon
-  res.set('Content-Type', 'text/plain')
-  try {
-    const db = mongoose.connection.db
-    if (!db) return res.end('no-db')
-    const ttlDays = await getDiskTtlDays()
-    await ensureDiskTtlIndex(db, ttlDays)
-    const now = new Date()
-    const expiresAt = new Date(now.getTime() + ttlDays * 86400 * 1000)
-    const sinceSec = Math.floor(now.getTime() / 1000) - 2 * 86400
-    const [articleCount, socialCount, tickerAgg, sentimentAgg] = await Promise.all([
-      db.collection('articles').countDocuments(),
-      db.collection('socials').countDocuments(),
-      db.collection('articles').aggregate([
-        { $match: { ticker: { $exists: true, $ne: '' }, detected_at: { $gte: sinceSec } } },
-        { $group: { _id: '$ticker', count: { $sum: 1 } } },
-        { $sort: { count: -1 } }, { $limit: 10 }
-      ]).toArray(),
-      db.collection('articles').aggregate([
-        { $match: { sentiment: { $in: ['bullish', 'bearish', 'neutral'] } } },
-        { $group: { _id: '$sentiment', count: { $sum: 1 } } }
-      ]).toArray(),
-    ])
-    const sentimentMap = Object.fromEntries(sentimentAgg.map(r => [r._id, r.count]))
-    await db.collection(DISK_ARCHIVE_COLLECTION).insertOne({
-      saved_at: now, expires_at: expiresAt, ttl_days: ttlDays,
-      articles_count: articleCount, social_count: socialCount,
-      top_tickers: tickerAgg.map(r => r._id),
-      sentiment: { bullish: sentimentMap.bullish ?? 0, bearish: sentimentMap.bearish ?? 0, neutral: sentimentMap.neutral ?? 0 },
-      trigger: 'session_end',
-    })
-    console.log('  Session auto-save →', articleCount, 'articles,', socialCount, 'social, TTL', ttlDays, 'days')
-    res.end('saved')
-  } catch (err) {
-    console.warn('Session auto-save failed:', err.message)
-    res.end('error')
-  }
-})
-
 // ─────────────────────────────────────────────────────────────────────────────
-
-async function autoSaveOnShutdown() {
-  try {
-    const db = mongoose.connection.db
-    if (!db) return
-    const ttlDays = await getDiskTtlDays()
-    await ensureDiskTtlIndex(db, ttlDays)
-    const now = new Date()
-    const expiresAt = new Date(now.getTime() + ttlDays * 86400 * 1000)
-    const [articleCount, socialCount] = await Promise.all([
-      db.collection('articles').countDocuments(),
-      db.collection('socials').countDocuments(),
-    ])
-    await db.collection(DISK_ARCHIVE_COLLECTION).insertOne({
-      saved_at: now, expires_at: expiresAt, ttl_days: ttlDays,
-      articles_count: articleCount, social_count: socialCount,
-      top_tickers: [], sentiment: {},
-      trigger: 'server_shutdown',
-    })
-    console.log('  Shutdown auto-save →', articleCount, 'articles,', socialCount, 'social')
-  } catch (err) {
-    console.warn('Shutdown auto-save failed:', err.message)
-  }
-}
 
 app.listen(PORT, () => {
     console.log()
@@ -7614,44 +5391,6 @@ app.listen(PORT, () => {
     console.log('  Docs    →  README-MONGODB.md')
     console.log()
   })
-
-  // Background auto-fetch every 20 minutes (server-side, no browser needed)
-  let cronRunning = false
-  cron.schedule('*/20 * * * *', async () => {
-    if (cronRunning) return
-    cronRunning = true
-    try {
-      const db = mongoose.connection.db
-      if (!db) return
-      const result = await runDataRefreshCycle(db, { socialMode: 'top_momentum', mode: 'fast' })
-      console.log(`[cron] auto-fetch: +${result.new_articles ?? 0} articles, +${result.social_new ?? 0} social, ${result.quotes_updated ?? 0} quotes`)
-    } catch (err) {
-      console.error('[cron] auto-fetch failed:', err.message)
-    } finally {
-      cronRunning = false
-    }
-  })
-  console.log('  Cron    →  auto-fetch every 20 min')
-
-  // Node social collector: fills the socials collection from sources reachable
-  // on Railway (StockTwits, Bluesky, ApeWisdom; Reddit RSS + X when available).
-  cron.schedule('*/10 * * * *', runNodeSocialCollector)
-  setTimeout(() => { runNodeSocialCollector() }, 15000)
-  console.log('  Cron    →  social collector every 10 min')
-
-  // Node quote refresher: keeps screener prices live without the Python pipeline
-  cron.schedule('*/5 * * * *', runNodeQuoteRefresher)
-  setTimeout(() => { runNodeQuoteRefresher() }, 5000)
-  console.log('  Cron    →  quote refresher every 5 min')
-
-  // Auto-save snapshot when the server process exits
-  const shutdown = async (signal) => {
-    console.log('  FlashFeed shutting down (' + signal + ')…')
-    await autoSaveOnShutdown()
-    process.exit(0)
-  }
-  process.once('SIGTERM', () => shutdown('SIGTERM'))
-  process.once('SIGINT',  () => shutdown('SIGINT'))
 }
 
 start()

@@ -30,7 +30,7 @@ const tabs = [
   { id: 'all', label: 'All' },
   { id: 'reddit', label: 'Reddit' },
   { id: 'bluesky', label: 'Bluesky' },
-  { id: 'twitter', label: '𝕏' },
+  { id: 'twitter', label: 'Twitter' },
   { id: 'stocktwits', label: 'StockTwits' },
 ]
 
@@ -231,32 +231,20 @@ export default function SocialPage() {
         </div>
       </div>
 
-      <div className="flex items-center justify-between border-b border-slate-700 mb-6">
-        <div className="flex gap-8">
-          {tabs.map(tab => (
-            <button
-              key={tab.id}
-              onClick={() => setActive(tab.id)}
-              className={
-                active === tab.id
-                  ? 'pb-4 text-white border-b-4 border-sky-500 font-semibold'
-                  : 'pb-4 text-neutral hover:text-white'
-              }
-            >
-              {tab.label}
-            </button>
-          ))}
-        </div>
-        <button
-          onClick={() => loadSocial()}
-          disabled={loading}
-          className="flex items-center gap-1.5 px-3 py-1.5 mb-1 rounded-md bg-slate-800 border border-slate-600 hover:border-sky-500 text-sm text-neutral hover:text-white disabled:opacity-50 transition"
-        >
-          <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={loading ? 'animate-spin' : ''}>
-            <path d="M21 12a9 9 0 1 1-6.219-8.56" />
-          </svg>
-          {loading ? 'Refreshing…' : 'Refresh'}
-        </button>
+      <div className="flex gap-8 border-b border-slate-700 mb-6">
+        {tabs.map(tab => (
+          <button
+            key={tab.id}
+            onClick={() => setActive(tab.id)}
+            className={
+              active === tab.id
+                ? 'pb-4 text-white border-b-4 border-sky-500 font-semibold'
+                : 'pb-4 text-neutral hover:text-white'
+            }
+          >
+            {tab.label}
+          </button>
+        ))}
       </div>
 
       <div className="border border-slate-700 bg-slate-800/60 rounded-xl p-6 mb-6">
@@ -285,21 +273,8 @@ export default function SocialPage() {
       ) : posts.length === 0 ? (
         <div className="text-neutral text-center py-20">
           <div className="text-5xl mb-4">💬</div>
-          {active === 'twitter' ? (
-            <>
-              <div>No X posts yet</div>
-              <div className="text-sm mt-2 max-w-md mx-auto">
-                The X API account has no paid credits, so X blocks tweet searches (free tier doesn't include them).
-                Posts appear here automatically once credits are added at developer.x.com — meanwhile the
-                StockTwits tab has live trader chatter.
-              </div>
-            </>
-          ) : (
-            <>
-              <div>No posts found for current filters</div>
-              <div className="text-sm mt-2">Try the 24h window — the collector refreshes every 10 minutes.</div>
-            </>
-          )}
+          <div>No posts found for current filters</div>
+          <div className="text-sm mt-2">Try 24h, or run the social collector to populate the live 5m window.</div>
         </div>
       ) : (
         <div className="space-y-3">

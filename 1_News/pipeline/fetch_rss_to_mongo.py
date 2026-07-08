@@ -162,17 +162,26 @@ def _load_sec_cik_ticker_map() -> dict[str, str]:
         return _SEC_CIK_TICKER_MAP
 
     _SEC_CIK_TICKER_MAP = {}
+    # SEC requires a descriptive User-Agent WITH a contact (a generic UA gets 403).
+    # Use a compliant default; fall back to a browser-impersonated request if the
+    # plain GET is still blocked. (Same CIK->ticker map approach proven in sentiment-scout.)
+    sec_ua = os.getenv("SEC_USER_AGENT", "FlashFeed research (contact: apa6457@psu.edu)")
+    sec_headers = {"User-Agent": sec_ua, "Accept-Encoding": "gzip, deflate", "Host": "www.sec.gov"}
+    payload = None
     try:
-        response = requests.get(
-            SEC_COMPANY_TICKERS_URL,
-            headers={"User-Agent": os.getenv("SEC_USER_AGENT", "FeedFlash Research Dashboard")},
-            timeout=15,
-        )
+        response = requests.get(SEC_COMPANY_TICKERS_URL, headers=sec_headers, timeout=15)
         response.raise_for_status()
         payload = response.json()
     except Exception as exc:
-        print(f"SEC ticker map unavailable: {exc}")
-        return _SEC_CIK_TICKER_MAP
+        try:
+            from curl_cffi import requests as _curl
+            response = _curl.get(SEC_COMPANY_TICKERS_URL, headers={"User-Agent": sec_ua},
+                                 impersonate="chrome124", timeout=15)
+            response.raise_for_status()
+            payload = response.json()
+        except Exception as exc2:
+            print(f"SEC ticker map unavailable: {exc} / fallback: {exc2}")
+            return _SEC_CIK_TICKER_MAP
 
     for row in payload.values() if isinstance(payload, dict) else []:
         try:

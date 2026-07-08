@@ -1,9 +1,10 @@
+'use client'
 import { useEffect, useRef } from 'react'
 
 interface MACDData {
-  macd: Array<{ time: string | number; value: number }>
-  signal: Array<{ time: string | number; value: number }>
-  histogram: Array<{ time: string | number; value: number }>
+  macd: Array<{ time: string; value: number }>
+  signal: Array<{ time: string; value: number }>
+  histogram: Array<{ time: string; value: number }>
 }
 
 interface Props { data?: MACDData }
@@ -31,16 +32,18 @@ export function MACDChart({ data }: Props) {
       })
       chartRef.current = chart
 
-      // MACD line — sky blue
+      // MACD line
       const macdSeries = chart.addSeries(LineSeries, { color: '#0ea5e9', lineWidth: 2 })
       macdSeries.setData(data.macd as any)
 
-      // Signal line — orange
+      // Signal line
       const signalSeries = chart.addSeries(LineSeries, { color: '#f97316', lineWidth: 2 })
       signalSeries.setData(data.signal as any)
 
-      // Histogram — green above zero, red below
-      const histSeries = chart.addSeries(HistogramSeries, { color: '#334155' })
+      // Histogram
+      const histSeries = chart.addSeries(HistogramSeries, {
+        color: '#334155',
+      })
       histSeries.setData(data.histogram.map(h => ({
         time: h.time,
         value: h.value,

@@ -10,6 +10,7 @@ const NAV = [
   { href: '/charts', label: 'Charts', icon: '📊' },
   { href: '/momentum', label: 'Momentum', icon: '📈' },
   { href: '/correlation', label: 'Correlation', icon: '🔗' },
+  { href: '/rolling', label: 'Rolling Window', icon: '🪟' },
 ]
 
 export function Sidebar() {

@@ -1,31 +1,36 @@
 'use client'
-import { useState, useCallback, useEffect } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
+import { useSearchParams } from 'react-router-dom'
+import { clsx } from 'clsx'
 import { CandlestickChart } from './CandlestickChart'
-import { TradingViewChart } from '@/components/charts/TradingViewChart'
 import { RSIChart } from './RSIChart'
 import { MACDChart } from './MACDChart'
 import { ResearchChart, type ResearchMode } from './ResearchChart'
-import { getAllChartStocks } from '../lib/stocks'
-import { ChartsGridPage } from './ChartsGridPage'
+import { TickerEnrichPanels, type EnrichData } from './TickerEnrichPanels'
+import { resampleCandles, bollingerFromCandles, rsiFromCandles, macdFromCandles, overlaySeries, bucketStart, type SocialSeries } from '@/lib/chartAgg'
+import type { StrategyMarker } from './CandlestickChart'
+
+// Price-chart bar timeframes. The backend serves ONLY 1-minute extended-hours
+// intraday bars (one session) — no daily/weekly — so the options stop at 1h and
+// are all client-side resamples of the same fetched 1-min data.
+const TIMEFRAMES: Array<{ min: number; label: string }> = [
+  { min: 1, label: '1m' }, { min: 5, label: '5m' }, { min: 15, label: '15m' },
+  { min: 30, label: '30m' }, { min: 60, label: '1h' },
+]
 
 interface ChartData {
-  candles: Array<{ time: string | number; open: number; high: number; low: number; close: number; volume?: number }>
-  bollinger?: { upper: Array<{ time: string | number; value: number }>; lower: Array<{ time: string | number; value: number }> }
-  rsi?: Array<{ time: string | number; value: number }>
-  macd?: { macd: Array<{ time: string | number; value: number }>; signal: Array<{ time: string | number; value: number }>; histogram: Array<{ time: string | number; value: number }> }
-  predicted?: Array<{ time: string | number; value: number }>
-  news_events?: Array<{ time: string | number; position?: string; color?: string; shape?: string; text?: string; title?: string; source?: string }>
-  prediction_events?: Array<{ time: string | number; title?: string; text?: string; entry_price?: number; label_5m?: { return_pct?: number; direction_correct?: boolean } | null }>
-  sentiment?: Array<{ time: string | number; value: number }>
-  social_density?: Array<{ time: string | number; value: number; scaled?: number; count?: number; session?: string }>
-  source_status?: { price?: string; price_source?: string; price_detail?: string; social?: string; news?: string; predictions?: string }
+  date?: string
+  n?: number
+  error?: string
+  candles: Array<{ time: number; open: number; high: number; low: number; close: number; volume?: number }>
+  bollinger?: { upper: Array<{ time: number; value: number }>; lower: Array<{ time: number; value: number }> }
+  rsi?: Array<{ time: number; value: number }>
+  macd?: { macd: Array<{ time: number; value: number }>; signal: Array<{ time: number; value: number }>; histogram: Array<{ time: number; value: number }> }
 }
 
-const RANGES    = ['1d', '5d', '1mo', '3mo', '6mo', '1y'] as const
-const INTERVALS = ['1m', '5m', '15m', '1h', '1d', '1wk'] as const
-const RANGE_LABELS: Record<string, string>    = { '1d': '1 Day', '5d': '5 Days', '1mo': '1 Month', '3mo': '3 Months', '6mo': '6 Months', '1y': '1 Year' }
-const INT_LABELS: Record<string, string>      = { '1m': '1m', '5m': '5m', '15m': '15m', '1h': '1h', '1d': '1d', '1wk': '1wk' }
-
+// Two jobs on one page, one ticker input:
+//   • candles — native lightweight-charts OHLC + RSI/MACD/Bollinger from /api/sentchart/charts
+//   • pd|sent|ds — the high schoolers' research views, embedded Chart.js (ResearchChart)
 type View = 'candles' | ResearchMode
 
 const VIEWS: Array<{ key: View; label: string }> = [
@@ -35,125 +40,217 @@ const VIEWS: Array<{ key: View; label: string }> = [
   { key: 'ds',      label: 'Density vs Sentiment' },
 ]
 
-const WIN_OPTS: Array<{ key: 'full' | '2h' | '1h'; label: string }> = [
-  { key: 'full', label: 'Full' },
+// The data is 1-min EXTENDED-HOURS intraday only (no daily/weekly history, no
+// fundamentals), so the controls are scoped to the intraday windows it supports.
+type Win = 'full' | '2h' | '1h'
+const WINDOWS: Array<{ key: Win; label: string }> = [
+  { key: 'full', label: 'Full Day' },
   { key: '2h',   label: 'Last 2h' },
   { key: '1h',   label: 'Last 1h' },
 ]
 
 export function ChartsPage() {
-  const [chartsTab, setChartsTab] = useState<'charts' | 'grid'>('charts')
-  const [ticker, setTicker]         = useState('AAPL')
-  const [range, setRange]           = useState<string>('1d')
-  const [interval, setInterval]     = useState<string>('1m')
-  const [data, setData]             = useState<ChartData | null>(null)
-  const [loading, setLoading]       = useState(false)
-  const [activeTicker, setActiveTicker] = useState<string | null>(null)
-  const [autoLoaded, setAutoLoaded] = useState(false)
-  const [view, setView]             = useState<View>('candles')
-  const [win, setWin]               = useState<'full' | '2h' | '1h'>('full')
+  // Ticker can arrive via ?t= (the Charts Grid links here for the clicked ticker).
+  const [sp, setSp] = useSearchParams()
+  const urlTicker = (sp.get('t') || '').toUpperCase().trim()
+  // Optional ?d=YYYY-MM-DD pins a historical session (phase-3 overlay demo:
+  // aligns candles with the historical social snapshot). Absent = latest session.
+  const urlDate = (sp.get('d') || '').trim()
+  const [input, setInput] = useState(urlTicker || 'AAPL')
+  const [ticker, setTicker] = useState<string | null>(urlTicker || null)
+  const [view, setView] = useState<View>('candles')
+  const [win, setWin] = useState<Win>('full')
+  const [data, setData] = useState<ChartData | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [enrich, setEnrich] = useState<EnrichData | null>(null)
+  const [enrichLoaded, setEnrichLoaded] = useState(false)  // distinguishes "loading" from "no enrichment endpoint"
 
-  const loadChart = useCallback(async (override?: string) => {
-    const sym = (typeof override === 'string' ? override : ticker).trim().toUpperCase()
-    if (!sym) return
-    setLoading(true)
-    try {
-      const res  = await fetch(`/api/charts/${sym}?range=${range}&interval=${interval}`)
-      const json = await res.json()
-      setData(json)
-      setActiveTicker(sym)
-    } finally {
-      setLoading(false)
-    }
-  }, [ticker, range, interval])
+  // Price-chart bar timeframe (client-side resample) + density/sentiment overlays.
+  // All three recompute from already-fetched data — no server round-trip.
+  const [tf, setTf] = useState(1)
+  const [showDensity, setShowDensity] = useState(false)
+  const [showSentiment, setShowSentiment] = useState(false)
+  const [social, setSocial] = useState<SocialSeries | null>(null)
+  const [socialMsg, setSocialMsg] = useState('')
+  const socialCache = useRef<Record<string, SocialSeries>>({})
 
+  // Strategy indicator (entry/exit arrows) — a chart-only overlay like density/
+  // sentiment. Fetched from /api/sentchart/signals once enabled, per ticker/window.
+  const [showStrategy, setShowStrategy] = useState(false)
+  const [signals, setSignals] = useState<StrategyMarker[] | null>(null)
+  const [signalsMsg, setSignalsMsg] = useState('')
+
+  const load = useCallback(() => {
+    const t = input.trim().toUpperCase()
+    if (t) { setTicker(t); setSp({ t }, { replace: true }) }
+  }, [input, setSp])
+
+  // Follow ?t= changes (e.g. a grid cell clicked while this page is already open).
   useEffect(() => {
-    if (!autoLoaded && !data && !loading) { setAutoLoaded(true); loadChart() }
-  }, [autoLoaded, data, loading, loadChart])
+    const t = (sp.get('t') || '').toUpperCase().trim()
+    if (t && t !== ticker) { setInput(t); setTicker(t) }
+  }, [sp])  // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Adapt ChartData to the number-time format ResearchChart expects
-  const researchData = data ? {
-    candles:        (data.candles ?? []).map(c => ({ ...c, time: typeof c.time === 'string' ? Math.floor(Date.parse(c.time) / 1000) : Number(c.time) })),
-    social_density: (data.social_density ?? []).map(d => ({ ...d, time: typeof d.time === 'string' ? Math.floor(Date.parse(d.time) / 1000) : Number(d.time), value: d.value })),
-    sentiment:      (data.sentiment ?? []).map(s => ({ ...s, time: typeof s.time === 'string' ? Math.floor(Date.parse(s.time) / 1000) : Number(s.time) })),
-  } : null
+  // Per-ticker enrichments (news alert + 3-day news + social/gossip). DB reads.
+  // Note: this endpoint is optional — FlashFeed's backend may not implement it.
+  // We check r.ok before parsing so a 404 degrades to a tidy empty state
+  // (enrichLoaded=true, enrich=null) instead of a console error or stuck spinner.
+  useEffect(() => {
+    if (!ticker) { setEnrich(null); setEnrichLoaded(false); return }
+    let cancelled = false
+    setEnrich(null); setEnrichLoaded(false)
+    fetch(`/api/ticker/${ticker}/enrich`)
+      .then(r => (r.ok ? r.json() : null))
+      .then(d => { if (!cancelled) { setEnrich(d); setEnrichLoaded(true) } })
+      .catch(() => { if (!cancelled) { setEnrich(null); setEnrichLoaded(true) } })
+    return () => { cancelled = true }
+  }, [ticker])
+
+  // Candlestick view fetches its own OHLC+indicators; research views are driven
+  // by <ResearchChart> off the same ticker/window.
+  useEffect(() => {
+    if (!ticker || view !== 'candles') return
+    let cancelled = false
+    setLoading(true); setError(null)
+    fetch(`/api/sentchart/charts/${ticker}?window=${win}${urlDate ? `&date=${urlDate}` : ''}`)
+      .then(r => r.json())
+      .then((json: ChartData) => {
+        if (cancelled) return
+        if (json.error) { setError(json.error); setData(null) }
+        else setData(json)
+      })
+      .catch(() => { if (!cancelled) setError('Failed to load chart data.') })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
+  }, [ticker, view, win, urlDate])
+
+  // Lazily fetch the social density/sentiment series — only once an overlay is
+  // enabled on the candles view, and cached per (ticker, date) so timeframe
+  // changes and toggles never re-fetch. Polls through the server's "walking"
+  // StockTwits backfill the same way ResearchChart does.
+  const wantOverlay = view === 'candles' && (showDensity || showSentiment)
+  const chartDate = data?.date
+  useEffect(() => {
+    if (!wantOverlay || !ticker || !chartDate) return
+    const key = `${ticker}|${chartDate}`
+    if (socialCache.current[key]) { setSocial(socialCache.current[key]); setSocialMsg(''); return }
+    let cancelled = false
+    let timer: number | null = null
+    setSocial(null); setSocialMsg('Loading social data…')
+    const poll = async () => {
+      try {
+        const s = await fetch(`/api/sentchart/chart/social?${new URLSearchParams({ ticker, date: chartDate })}`).then(r => r.json())
+        if (cancelled) return
+        if (s.error) { setSocialMsg('Social: ' + s.error); return }
+        if (s.status === 'walking') { setSocialMsg(`Loading social history, ${s.count || 0} messages…`); timer = window.setTimeout(poll, 1500); return }
+        if (!s.messages) { setSocialMsg('No social data for this day.'); return }
+        const series: SocialSeries = { labels: s.labels, density: s.density, sent_labels: s.sent_labels, scores_smooth: s.scores_smooth }
+        socialCache.current[key] = series
+        setSocial(series); setSocialMsg(`Social: ${s.source} · ${s.messages} msgs`)
+      } catch { if (!cancelled) setSocialMsg('Social data: error') }
+    }
+    poll()
+    return () => { cancelled = true; if (timer) clearTimeout(timer) }
+  }, [wantOverlay, ticker, chartDate])
+
+  // Strategy entry/exit markers — fetched only once the indicator is toggled on,
+  // for the candles view, per (ticker, window, date). The backend computes on the
+  // full session and returns markers already filtered to the requested window.
+  const wantStrategy = view === 'candles' && showStrategy
+  useEffect(() => {
+    if (!wantStrategy || !ticker) return
+    let cancelled = false
+    setSignals(null); setSignalsMsg('Loading strategy signals…')
+    fetch(`/api/sentchart/signals/${ticker}?window=${win}${urlDate ? `&date=${urlDate}` : ''}`)
+      .then(r => r.json())
+      .then((j: { markers?: StrategyMarker[]; trades?: number; error?: string; note?: string }) => {
+        if (cancelled) return
+        if (j.error) { setSignals(null); setSignalsMsg('Strategy: ' + j.error); return }
+        const markers = j.markers ?? []
+        setSignals(markers)
+        setSignalsMsg(markers.length
+          ? `Strategy: ${j.trades ?? 0} trade(s) · ${markers.length} markers`
+          : (j.note || 'Strategy: no signals for this session'))
+      })
+      .catch(() => { if (!cancelled) setSignalsMsg('Strategy: error') })
+    return () => { cancelled = true }
+  }, [wantStrategy, ticker, win, urlDate])
+
+  // Snap marker times onto the active timeframe's bucket so the arrows stay
+  // registered to the resampled candles (1m is a no-op). Off => undefined.
+  const strategyMarkers = useMemo(() => {
+    if (!showStrategy || !signals) return undefined
+    return signals.map(m => ({ ...m, time: bucketStart(m.time, tf) }))
+  }, [showStrategy, signals, tf])
+
+  // Resample candles + (re)compute Bollinger + build overlays from already-fetched
+  // data. Pure client-side: re-runs on timeframe / toggle / data change only.
+  const priceView = useMemo(() => {
+    const raw = (data?.candles ?? []) as any[]
+    const candles = resampleCandles(raw as any, tf)
+    // Default 1m keeps the server's Bollinger exactly; coarser timeframes recompute
+    // it on the resampled closes so the band stays aligned to the bars.
+    const bollinger = tf === 1 ? (data?.bollinger as any) : bollingerFromCandles(candles, 20, 2)
+    // RSI/MACD recompute on the resampled closes at coarser timeframes so they
+    // sit on the same time buckets as the candles (server values kept at 1m).
+    const rsi = tf === 1 ? (data?.rsi as any) : rsiFromCandles(candles, 14)
+    const macd = tf === 1 ? (data?.macd as any) : macdFromCandles(candles, 12, 26, 9)
+    const ov = overlaySeries(raw as any, social, tf, 15)
+    return {
+      candles, bollinger, rsi, macd,
+      density: showDensity ? ov.density : undefined,
+      sentiment: showSentiment ? ov.sentiment : undefined,
+      count: candles.length,
+    }
+  }, [data, tf, social, showDensity, showSentiment])
 
   return (
     <div>
-      {/* Charts / Charts Grid sub-tabs */}
-      <div className="flex items-center gap-1 border-b border-border mb-4">
-        {(['charts', 'grid'] as const).map(tab => (
-          <button
-            key={tab}
-            onClick={() => setChartsTab(tab)}
-            className={`px-4 py-2 text-xs font-medium border-b-2 -mb-px transition-colors whitespace-nowrap ${
-              chartsTab === tab
-                ? 'text-white border-sky-400'
-                : 'text-neutral border-transparent hover:text-white hover:border-slate-600'
-            }`}
-          >
-            {tab === 'charts' ? 'Charts' : 'Charts Grid'}
-          </button>
-        ))}
-      </div>
-
-      {chartsTab === 'grid' && <ChartsGridPage />}
-      {chartsTab === 'charts' && <>
-
       {/* Toolbar */}
-      <div className="flex items-center gap-2 mb-3 flex-wrap">
-        <select
-          value={getAllChartStocks().includes(ticker) ? ticker : ''}
-          onChange={e => { const v = e.target.value; if (v) { setTicker(v); loadChart(v) } }}
-          className="bg-bg border border-border text-sm text-neutral rounded px-2 py-2 focus:outline-none focus:border-accent"
-        >
-          <option value="">Top stocks ▾</option>
-          {getAllChartStocks().map(t => <option key={t} value={t}>{t}</option>)}
-        </select>
-
+      <div className="flex items-center gap-3 mb-2 flex-wrap">
         <input
-          value={ticker}
-          onChange={e => setTicker(e.target.value.toUpperCase())}
-          onKeyDown={e => e.key === 'Enter' && loadChart()}
-          placeholder="Ticker…"
-          className="w-[120px] bg-bg border border-border text-sm text-white rounded px-3 py-2 font-mono focus:outline-none focus:border-accent placeholder:text-slate-600"
+          value={input}
+          onChange={e => setInput(e.target.value.toUpperCase())}
+          onKeyDown={e => e.key === 'Enter' && load()}
+          placeholder="Ticker (e.g. AAPL)"
+          className="w-[140px] bg-bg border border-border text-sm text-white rounded px-3 py-2 font-mono focus:outline-none focus:border-accent placeholder:text-slate-600"
         />
-
-        <select value={range} onChange={e => setRange(e.target.value)}
-          className="bg-bg border border-border text-sm text-neutral rounded px-2 py-2 focus:outline-none focus:border-accent">
-          {RANGES.map(r => <option key={r} value={r}>{RANGE_LABELS[r]}</option>)}
-        </select>
-
-        <select value={interval} onChange={e => setInterval(e.target.value)}
-          className="bg-bg border border-border text-sm text-neutral rounded px-2 py-2 focus:outline-none focus:border-accent">
-          {INTERVALS.map(i => <option key={i} value={i}>{INT_LABELS[i]}</option>)}
-        </select>
-
         <button
-          onClick={() => loadChart()}
-          disabled={loading || !ticker.trim()}
+          onClick={load}
+          disabled={!input.trim()}
           className="px-4 py-2 bg-accent text-white text-sm font-medium rounded hover:bg-sky-400 disabled:opacity-50 transition-colors"
         >
           {loading ? 'Loading…' : 'Load Chart'}
         </button>
 
-        {activeTicker && <span className="text-accent font-mono font-bold text-lg ml-1">{activeTicker}</span>}
+        {/* Window selector (intraday only) */}
+        <div className="flex items-stretch rounded overflow-hidden border border-border">
+          {WINDOWS.map(w => (
+            <button key={w.key} onClick={() => setWin(w.key)}
+              className={`px-3 py-1.5 text-xs transition-colors ${win === w.key ? 'bg-accent text-white' : 'bg-surface text-neutral hover:text-white'}`}>
+              {w.label}
+            </button>
+          ))}
+        </div>
 
-        {/* Window selector (research views only) */}
-        {view !== 'candles' && (
-          <div className="flex items-stretch rounded overflow-hidden border border-border ml-auto">
-            {WIN_OPTS.map(w => (
-              <button key={w.key} onClick={() => setWin(w.key)}
-                className={`px-3 py-1.5 text-xs transition-colors ${win === w.key ? 'bg-accent text-white' : 'bg-surface text-neutral hover:text-white'}`}>
-                {w.label}
-              </button>
-            ))}
-          </div>
+        {ticker && <span className="text-accent font-mono font-bold text-lg ml-1">{ticker}</span>}
+        {/* Structured-news alert — fires only when FeedFlash has recent news for the ticker */}
+        {enrich?.news_alert && (
+          <span
+            title={`${enrich.news_alert_count} structured news item(s) in the last 3 days`}
+            className="flex items-center gap-1 text-[11px] font-semibold text-red-400 bg-red-500/10 border border-red-500/40 rounded px-2 py-0.5 animate-pulse"
+          >
+            ▲ NEWS {enrich.news_alert_count}
+          </span>
+        )}
+        {data?.date && view === 'candles' && (
+          <span className="text-xs text-neutral">{data.date} · {data.n} bars</span>
         )}
       </div>
 
-      {/* View tabs */}
-      <div className="flex items-center gap-0 mb-3 border-b border-border">
+      {/* View selector */}
+      <div className="flex items-center gap-1 mb-3 border-b border-border flex-wrap">
         {VIEWS.map(v => (
           <button key={v.key} onClick={() => setView(v.key)}
             className={`px-3 py-1.5 text-xs transition-colors border-b-2 -mb-px ${
@@ -162,128 +259,87 @@ export function ChartsPage() {
             {v.label}
           </button>
         ))}
-        <span className="ml-auto text-[10px] text-neutral pr-2">extended hours · 04:00–20:00 ET</span>
+        <span className="ml-auto text-[10px] text-neutral pr-1">1-min intraday · extended hours 04:00–20:00 ET</span>
       </div>
 
-      {/* Chart area */}
-      {data ? (
-        <>
-          {view === 'candles' && (
-            <div className="space-y-3">
-              {data.candles?.length ? (
-                <div className="grid grid-cols-2 md:grid-cols-6 gap-2">
-                  <Status label="Price"       value={data.source_status?.price ?? 'ok'} />
-                  <Status label="Source"      value={data.source_status?.price_source ?? 'market'} />
-                  <Status label="Social"      value={data.source_status?.social === 'no_social_posts' ? '0 posts' : (data.source_status?.social ?? 'pending')} />
-                  <Status label="News Markers" value={String(data.news_events?.length ?? 0)} />
-                  <Status label="Predictions" value={String(data.prediction_events?.length ?? 0)} />
-                  <Status label="Bars"        value={String(data.candles?.length ?? 0)} />
-                </div>
-              ) : (
-                <div className="text-[10px] text-slate-500 px-1">Live chart via TradingView · social &amp; prediction overlays require a data fetch</div>
-              )}
-
-              {data.candles?.length ? (
-                <>
-                  <ChartCard title={`${INT_LABELS[interval] ?? interval} Price + Bollinger Bands`} height={300}>
-                    <CandlestickChart
-                      candles={data.candles as any}
-                      bollinger={data.bollinger as any}
-                      predicted={data.predicted as any}
-                      newsEvents={data.news_events as any}
-                      density={data.social_density as any}
-                      sentiment={data.sentiment as any}
-                    />
-                  </ChartCard>
-                  <PredictionEvents events={data.prediction_events ?? []} />
-                  <ChartCard title="RSI (14)" height={120}>
-                    <RSIChart data={data.rsi ?? []} />
-                  </ChartCard>
-                  <ChartCard title="MACD (12,26,9)" height={120}>
-                    <MACDChart data={data.macd} />
-                  </ChartCard>
-                </>
-              ) : (
-                <ChartCard title={`${activeTicker ?? ticker} — Price · RSI · MACD (via TradingView)`} height={560}>
-                  <TradingViewChart
-                    ticker={activeTicker ?? ticker}
-                    interval={interval}
-                    height={560}
-                    studies={['RSI@tv-basicstudies', 'MACD@tv-basicstudies']}
-                  />
-                </ChartCard>
-              )}
-            </div>
-          )}
-
-          {(view === 'pd' || view === 'sent' || view === 'ds') && (
-            <div className="bg-surface border border-border rounded-lg overflow-hidden" style={{ height: 460 }}>
-              <ResearchChart
-                ticker={activeTicker ?? ticker}
-                mode={view}
-                data={researchData}
-                win={win}
-              />
-            </div>
-          )}
-        </>
-      ) : (
-        <div className="text-center py-20 text-neutral text-sm">
-          {loading ? 'Loading chart…' : 'Enter a ticker and click Load Chart.'}
+      {!ticker ? (
+        <div className="text-center py-20 text-neutral">
+          <div className="text-4xl mb-3">📊</div>
+          <div className="text-sm">Enter a ticker symbol and click Load Chart.</div>
         </div>
-      )}
-
-      </>}
-    </div>
-  )
-}
-
-// ── Sub-components ─────────────────────────────────────────────────────────────
-
-function eventTime(value: string | number) {
-  const sec = typeof value === 'number' ? value : Math.floor(Date.parse(value) / 1000)
-  if (!Number.isFinite(sec) || sec <= 0) return '--'
-  return new Date(sec * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
-}
-
-function PredictionEvents({ events }: { events: NonNullable<ChartData['prediction_events']> }) {
-  if (!events.length) return null
-  return (
-    <div className="bg-surface border border-border rounded-lg overflow-hidden">
-      <div className="px-3 py-2 border-b border-border">
-        <span className="text-xs text-neutral font-medium uppercase">Prediction Signals</span>
-      </div>
-      <div className="divide-y divide-border/60">
-        {events.slice(-5).map((event, index) => {
-          const actual  = event.label_5m?.return_pct
-          const correct = event.label_5m?.direction_correct
-          return (
-            <div key={`${event.time}-${index}`} className="grid grid-cols-[86px_1fr_100px] gap-2 px-3 py-2 text-xs items-center">
-              <span className="font-mono text-neutral">{eventTime(event.time)}</span>
-              <span className="text-slate-200 truncate">{event.title || event.text || 'Prediction signal'}</span>
-              <span className={correct === true ? 'text-emerald-400 font-mono text-right' : correct === false ? 'text-orange-400 font-mono text-right' : 'text-neutral font-mono text-right'}>
-                {actual == null ? 'pending' : `${actual > 0 ? '+' : ''}${Number(actual).toFixed(2)}%`}
-              </span>
+      ) : (
+        <>
+          {view === 'candles' ? (
+            error ? (
+              <div className="bg-surface border border-border rounded-lg p-8 text-center text-neutral">
+                <div className="text-sm">{error}</div>
+              </div>
+            ) : data ? (
+              <div className="space-y-3">
+                {/* Price-chart controls: client-side timeframe resample + overlays */}
+                <div className="flex items-center gap-3 flex-wrap text-xs">
+                  <div className="flex items-center gap-1">
+                    <span className="text-neutral mr-1">Timeframe</span>
+                    <div className="flex items-stretch rounded overflow-hidden border border-border">
+                      {TIMEFRAMES.map(t => (
+                        <button key={t.min} onClick={() => setTf(t.min)}
+                          className={clsx('px-2.5 py-1 transition-colors',
+                            tf === t.min ? 'bg-accent text-white' : 'bg-surface text-neutral hover:text-white')}>
+                          {t.label}
+                        </button>
+                      ))}
+                    </div>
+                    <span className="text-neutral ml-1 tabular-nums">{priceView.count} bars</span>
+                  </div>
+                  <label className="flex items-center gap-1.5 cursor-pointer select-none">
+                    <input type="checkbox" checked={showDensity} onChange={e => setShowDensity(e.target.checked)}
+                      className="accent-orange-500 cursor-pointer" />
+                    <span style={{ color: '#FF9800' }}>Density</span>
+                  </label>
+                  <label className="flex items-center gap-1.5 cursor-pointer select-none">
+                    <input type="checkbox" checked={showSentiment} onChange={e => setShowSentiment(e.target.checked)}
+                      className="accent-green-500 cursor-pointer" />
+                    <span style={{ color: '#4CAF50' }}>Sentiment</span>
+                  </label>
+                  <label className="flex items-center gap-1.5 cursor-pointer select-none">
+                    <input type="checkbox" checked={showStrategy} onChange={e => setShowStrategy(e.target.checked)}
+                      className="accent-sky-500 cursor-pointer" />
+                    <span className="text-accent">Strategy ▲▼</span>
+                  </label>
+                  {(showDensity || showSentiment) && socialMsg && (
+                    <span className="text-neutral">{socialMsg}</span>
+                  )}
+                  {showStrategy && signalsMsg && (
+                    <span className="text-neutral">{signalsMsg}</span>
+                  )}
+                  <span className="ml-auto text-[10px] text-neutral">1-min intraday only · resampled client-side</span>
+                </div>
+                <ChartCard title="Candlestick + Bollinger Bands (20,2)" height={300}>
+                  <CandlestickChart candles={priceView.candles as any} bollinger={priceView.bollinger as any}
+                    densityOverlay={priceView.density} sentimentOverlay={priceView.sentiment}
+                    strategyMarkers={strategyMarkers} />
+                </ChartCard>
+                <ChartCard title="RSI (14)" height={130}>
+                  <RSIChart data={(priceView.rsi ?? []) as any} />
+                </ChartCard>
+                <ChartCard title="MACD (12, 26, 9)" height={150}>
+                  <MACDChart data={priceView.macd as any} />
+                </ChartCard>
+              </div>
+            ) : (
+              <div className="text-neutral text-sm animate-pulse p-4">Loading chart…</div>
+            )
+          ) : (
+            <div className="bg-surface border border-border rounded-lg overflow-hidden" style={{ height: 460 }}>
+              <ResearchChart ticker={ticker} mode={view} window={win} date={urlDate} />
             </div>
-          )
-        })}
-      </div>
-    </div>
-  )
-}
+          )}
 
-function Status({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="bg-surface border border-border rounded-lg px-3 py-2 min-w-0">
-      <div className="font-mono text-sm text-white truncate">{value}</div>
-      <div className="text-[10px] uppercase text-neutral mt-0.5">{label}</div>
+          {/* Per-ticker enrichments below the chart: 3-day news + social/gossip */}
+          <TickerEnrichPanels ticker={ticker} enrich={enrich} loaded={enrichLoaded} />
+        </>
+      )}
     </div>
-  )
-}
-
-function EmptyChart({ message }: { message: string }) {
-  return (
-    <div className="h-full flex items-center justify-center px-4 text-center text-xs text-neutral">{message}</div>
   )
 }
 
