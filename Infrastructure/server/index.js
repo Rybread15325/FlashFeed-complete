@@ -4325,6 +4325,37 @@ app.get("/api/charts/:ticker", async (req, res) => {
   }
 })
 
+app.get("/api/market-quote/:ticker", async (req, res) => {
+  try {
+    const ticker = normalizeTickerList([req.params.ticker], 1, { ensurePrivate: false })[0] || ""
+    if (!ticker) return res.status(400).json({ ok: false, error: "ticker is required" })
+    const result = await fetchYahooCandles(ticker, "5d", "1d")
+    const candles = result.candles || []
+    const last = candles[candles.length - 1] || null
+    const previous = candles[candles.length - 2] || null
+    const price = Number(last?.close)
+    const previousClose = Number(previous?.close)
+    const changePct = Number.isFinite(price) && Number.isFinite(previousClose) && previousClose > 0
+      ? Number((((price - previousClose) / previousClose) * 100).toFixed(2))
+      : null
+    res.set("Cache-Control", "no-store")
+    res.json({
+      ok: true,
+      ticker,
+      price: Number.isFinite(price) ? price : null,
+      previousClose: Number.isFinite(previousClose) ? previousClose : null,
+      change_pct: changePct,
+      volume: Number.isFinite(Number(last?.volume)) ? Number(last.volume) : null,
+      quote_time: last?.time || null,
+      source: "market_chart_provider",
+      provider_range: result.provider_range,
+      provider_interval: result.provider_interval,
+    })
+  } catch (err) {
+    res.status(502).json({ ok: false, error: String(err.message || err), source: "market_chart_provider" })
+  }
+})
+
 function articlePrimaryTicker(article) {
   return normalizeTickerList(String(article?.ticker || "").split(","), 1, { ensurePrivate: false })[0] || ""
 }

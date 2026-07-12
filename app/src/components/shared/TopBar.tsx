@@ -16,13 +16,17 @@ const NAV = [
   { href: '/ai', label: 'AI' },
   { href: '/news', label: 'News' },
   { href: '/screener', label: 'Screener' },
+  { href: '/decision-map', label: 'Decision Map' },
   { href: '/social', label: 'Social' },
+  { href: '/mirror', label: 'Mirror' },
   { href: '/charts', label: 'Charts' },
   { href: '/momentum', label: 'Momentum' },
   { href: '/correlation', label: 'Correlation' },
   { href: '/rolling', label: 'Rolling' },
   { href: '/settings', label: 'Settings' },
 ]
+const PRIMARY_NAV = NAV.slice(0, 9)
+const MORE_NAV = NAV.slice(9)
 
 export function TopBar() {
   const { pathname } = useLocation()
@@ -40,6 +44,7 @@ export function TopBar() {
   const [fetchMode, setFetchMode] = useState<'fast' | 'full'>('fast')
   const [watchLines, setWatchLines] = useState<Array<{ text: string; type: string; ts: number }>>([])
   const [showSentiment, setShowSentiment] = useState(false)
+  const [showMoreNav, setShowMoreNav] = useState(false)
   const [lastAutoResult, setLastAutoResult] = useState<{ new?: number; updated?: number; ms?: number; at: number } | null>(null)
   const watchRef = useRef<EventSource | null>(null)
   const [diskSaving, setDiskSaving] = useState(false)
@@ -201,7 +206,7 @@ export function TopBar() {
           </NavLink>
 
           <nav className="hidden xl:flex items-center gap-0.5 ml-2">
-            {NAV.map(({ href, label }) => {
+            {PRIMARY_NAV.map(({ href, label }) => {
               const active = pathname === href || pathname.startsWith(`${href}/`)
               return (
                 <NavLink
@@ -218,6 +223,36 @@ export function TopBar() {
                 </NavLink>
               )
             })}
+            <div className="relative">
+              <button
+                onClick={() => setShowMoreNav(v => !v)}
+                className={clsx(
+                  'px-2 py-1 text-[11px] rounded border transition-colors whitespace-nowrap',
+                  MORE_NAV.some(({ href }) => pathname === href || pathname.startsWith(`${href}/`))
+                    ? 'bg-accent/15 border-accent/50 text-white'
+                    : 'border-transparent text-neutral hover:text-white hover:bg-bg/60'
+                )}
+              >
+                More
+              </button>
+              {showMoreNav && (
+                <div className="absolute left-0 top-full z-50 mt-2 w-40 rounded-lg border border-border bg-surface p-1 shadow-xl">
+                  {MORE_NAV.map(({ href, label }) => (
+                    <NavLink
+                      key={href}
+                      to={href}
+                      onClick={() => setShowMoreNav(false)}
+                      className={({ isActive }) => clsx(
+                        'block rounded px-3 py-2 text-xs transition-colors',
+                        isActive ? 'bg-accent/15 text-white' : 'text-neutral hover:bg-bg hover:text-white'
+                      )}
+                    >
+                      {label}
+                    </NavLink>
+                  ))}
+                </div>
+              )}
+            </div>
           </nav>
 
           <div className="flex-1" />
