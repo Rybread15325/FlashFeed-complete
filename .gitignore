@@ -22,3 +22,5 @@ ruvector.db
 
 # chart-service point-in-time SQLite social snapshot (real data, phase 2) - never commit
 social_snapshot.db
+
+.vercel

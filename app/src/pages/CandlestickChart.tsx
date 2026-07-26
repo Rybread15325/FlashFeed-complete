@@ -43,7 +43,7 @@ export function CandlestickChart({ candles, bollinger, densityOverlay, sentiment
         height: containerRef.current.clientHeight,
         layout: {
           background: { type: ColorType.Solid, color: 'transparent' },
-          textColor: '#94a3b8',
+          textColor: '#ef4444',
           fontSize: 11,
         },
         grid: {
@@ -51,7 +51,7 @@ export function CandlestickChart({ candles, bollinger, densityOverlay, sentiment
           horzLines: { color: '#1e293b' },
         },
         crosshair: { mode: CrosshairMode.Normal },
-        rightPriceScale: { borderColor: '#334155' },
+        rightPriceScale: { borderColor: '#334155', textColor: '#94a3b8' },
         timeScale: { borderColor: '#334155', timeVisible: true },
       })
       chartRef.current = chart

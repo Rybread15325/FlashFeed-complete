@@ -221,8 +221,11 @@ services:
       MONGO_URI: ${MONGO_URI:-mongodb://mongo:27017}
       MONGO_DB: ${MONGO_DB:-flashfeed}
       MONGO_COLL: ${MONGO_COLL:-social_history}
+      REDIS_URL: redis://redis:6379/0
     depends_on:
       mongo:
+        condition: service_started
+      redis:
         condition: service_started
 
 volumes:
